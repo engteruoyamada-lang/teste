@@ -135,7 +135,7 @@ CSS = f"""
 
   /* Sidebar */
   section[data-testid="stSidebar"] {{
-    background-color: white;
+    background-color: black;
     border-right: 1px solid #e0e8e0;
   }}
   section[data-testid="stSidebar"] .stSelectbox label,
