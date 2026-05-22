@@ -104,7 +104,7 @@ CSS = f"""
   .band-card p {{
     margin: 0;
     font-size: 0.82rem;
-    color: #555;
+    color: #000;
     line-height: 1.4;
   }}
 
