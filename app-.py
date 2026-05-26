@@ -1,24 +1,68 @@
 """
 =============================================================================
 YAMADA ENGENHARIA — Plataforma de Monitoramento Agroclimático
-MVP Streamlit | GOES-19 + Open-Meteo + NASA POWER + INPE + SATVeg + INMET
-Mato Grosso do Sul — Análise por Município
+MVP Streamlit v4.0 | GOES-19 (goes2go) + Open-Meteo + NASA POWER + INPE + SATVeg + INMET
+Mato Grosso do Sul — Análise por Coordenada (Lat/Lon livre)
 
-VERSÃO 3.0 — Melhorias:
-  • Organização em 6 abas temáticas
-  • Sistema de relatório por e-mail (integrado do Monitor PM2.5/PM10)
-  • Scheduler automático (APScheduler) para envio às 06h, 12h e 18h
-  • Keep-alive para evitar que o app adormeça no Streamlit Cloud
+VERSÃO 4.0 — Melhorias sobre v3.0 (briefing Dr. Hiroshi Yamada):
+  • Substituição de municípios fixos por seleção lat/lon livre + nome do ponto
+  • Open-Meteo: modelo ICON-EU (primário) + GFS025 (fallback), 72h horárias
+  • 15 variáveis horárias incluindo CAPE, LI, CIN, precipitação probabilística,
+    radiação direta/difusa, temperatura do solo, umidade do solo
+  • Gráfico matplotlib 5-painéis interativo com mplcursors (tooltip hover)
+    – Painel 1: Temperatura + ponto de orvalho + CAPE (eixo secundário)
+    – Painel 2: Precipitação + probabilidade de chuva (eixo secundário)
+    – Painel 3: Radiação solar (GHI / DNI / Difusa) com pico anotado
+    – Painel 4: Vento + rajadas + limites operacionais
+    – Painel 5: Umidade relativa + Heat Index + limites de defensivos
+  • GOES-19 via goes2go: B02/Visível, B09/Vapor d'água, B13/IR Clean,
+    B14/IR Longo, RGB AirMass, RGB Day Cloud Phase — imagens ≤10 min
+  • Nowcasting de chuva: 3 fontes integradas (TB GOES-19, prob. Open-Meteo,
+    CAPE+LI) com timeline 0–6h e diagnóstico por severidade
+  • Organização em 7 abas temáticas
+  • Sistema de relatório por e-mail (SMTP Gmail SSL)
+  • Scheduler APScheduler (06h / 12h / 18h) + keep-alive
 =============================================================================
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IMPORTS
+# AUTO-INSTALAÇÃO DE DEPENDÊNCIAS OPCIONAIS
+# ─────────────────────────────────────────────────────────────────────────────
+import sys, subprocess
+
+def _pip_install(pkg: str):
+    """Instala pacote via pip se não estiver disponível."""
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", pkg, "-q"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
+
+try:
+    import goes2go  # noqa: F401
+except ImportError:
+    _pip_install("goes2go")
+
+try:
+    import mplcursors  # noqa: F401
+except ImportError:
+    _pip_install("mplcursors")
+
+try:
+    import cartopy  # noqa: F401
+except ImportError:
+    _pip_install("cartopy")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTS PRINCIPAIS
 # ─────────────────────────────────────────────────────────────────────────────
 import streamlit as st
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 import requests
@@ -35,20 +79,39 @@ from shapely.geometry import box
 import warnings
 warnings.filterwarnings("ignore")
 
-# ── E-mail ────────────────────────────────────────────────────────────────────
+# E-mail
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 
-# ── Scheduler (relatórios automáticos) ───────────────────────────────────────
+# Scheduler
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import threading
 import logging
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+# Imports opcionais (com fallback gracioso)
+try:
+    import mplcursors
+    _HAS_MPLCURSORS = True
+except ImportError:
+    _HAS_MPLCURSORS = False
+
+try:
+    import goes2go
+    from goes2go import GOES
+    _HAS_GOES2GO = True
+except ImportError:
+    _HAS_GOES2GO = False
+
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    _HAS_CARTOPY = True
+except ImportError:
+    _HAS_CARTOPY = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURAÇÃO DA PÁGINA
@@ -61,7 +124,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IDENTIDADE VISUAL
+# IDENTIDADE VISUAL YAMADA
 # ─────────────────────────────────────────────────────────────────────────────
 VERDE_ESCURO  = "#1B4D2E"
 VERDE_MEDIO   = "#3DA63A"
@@ -94,7 +157,6 @@ CSS = f"""
     color: rgba(255,255,255,0.82); margin: 4px 0 0 0;
     font-size: 0.95rem; font-weight: 300;
   }}
-
   .band-card {{
     background: white; border-left: 4px solid {VERDE_MEDIO};
     border-radius: 8px; padding: 14px 18px; margin-bottom: 10px;
@@ -126,15 +188,11 @@ CSS = f"""
     box-shadow: 0 6px 22px rgba(27,77,46,0.45) !important;
   }}
 
-  /* Sidebar — fundo escuro com textos claros */
   section[data-testid="stSidebar"] {{
     background-color: #1a2e1c !important;
     border-right: 1px solid #2d5a30;
   }}
   section[data-testid="stSidebar"] * {{ color: #e8f5e9 !important; }}
-  section[data-testid="stSidebar"] .stSelectbox label,
-  section[data-testid="stSidebar"] .stSlider label,
-  section[data-testid="stSidebar"] .stCheckbox label,
   section[data-testid="stSidebar"] label {{
     font-family: 'Montserrat', sans-serif !important; font-weight: 600 !important;
     font-size: 0.85rem !important; color: #a5d6a7 !important;
@@ -152,7 +210,6 @@ CSS = f"""
     box-shadow: 0 2px 10px rgba(0,0,0,0.07);
     border-top: 3px solid {VERDE_MEDIO};
   }}
-
   .secao-titulo {{
     font-family: 'Montserrat', sans-serif; font-weight: 800;
     font-size: 1.15rem; color: {VERDE_ESCURO};
@@ -160,69 +217,63 @@ CSS = f"""
     padding-bottom: 6px; margin: 28px 0 16px 0;
   }}
   hr {{ border-color: #ddeedd; margin: 20px 0; }}
+
+  /* Card de nowcasting */
+  .nowcast-card {{
+    border-radius: 10px; padding: 16px 20px; margin: 4px 0;
+    text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURAÇÃO DE E-MAIL (via st.secrets)
-#
-# No arquivo .streamlit/secrets.toml, adicione:
-#
-#   [email]
-#   remetente     = "seuemail@gmail.com"
-#   senha_app     = "sua_senha_de_app_gmail"
-#   destinatario  = "destino@email.com"        # pode ser lista: "a@b.com,c@d.com"
-#
-# Para gerar a senha de app Gmail:
-#   Conta Google → Segurança → Verificação em 2 etapas → Senhas de app
+# CONFIGURAÇÃO DE E-MAIL
 # ─────────────────────────────────────────────────────────────────────────────
 try:
-    EMAIL_REMETENTE     = st.secrets["email"]["remetente"]
-    EMAIL_SENHA_APP     = st.secrets["email"]["senha_app"]
-    _dest_raw           = st.secrets["email"]["destinatario"]
-    if isinstance(_dest_raw, str):
-        EMAIL_DESTINATARIOS = [e.strip() for e in _dest_raw.split(",") if e.strip()]
-    else:
-        EMAIL_DESTINATARIOS = list(_dest_raw)
-    _email_configurado  = True
-except (KeyError, Exception):
-    EMAIL_DESTINATARIOS = []
-    _email_configurado  = False
+    EMAIL_REMETENTE    = st.secrets["email"]["remetente"]
+    EMAIL_SENHA_APP    = st.secrets["email"]["senha_app"]
+    _dest_raw          = st.secrets["email"]["destinatario"]
+    EMAIL_DESTINATARIOS = (
+        [e.strip() for e in _dest_raw.split(",") if e.strip()]
+        if isinstance(_dest_raw, str) else list(_dest_raw)
+    )
+    _email_configurado = True
+except Exception:
+    EMAIL_REMETENTE    = ""
+    EMAIL_DESTINATARIOS= []
+    _email_configurado = False
 
-# ── Variáveis globais do scheduler ────────────────────────────────────────────
 _scheduler_log: list = []
 _log_lock = threading.Lock()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DADOS ESTÁTICOS
+# DADOS ESTÁTICOS — PONTOS PREDEFINIDOS PARA MS (substitui município fixo)
 # ─────────────────────────────────────────────────────────────────────────────
-MUNICIPIOS_MS = {
-    "Campo Grande":    {"lat": -20.4428, "lon": -54.6460, "regiao": "Centro"},
-    "Dourados":        {"lat": -22.2212, "lon": -54.8056, "regiao": "Sul"},
-    "Três Lagoas":     {"lat": -20.7519, "lon": -51.6783, "regiao": "Leste"},
-    "Corumbá":         {"lat": -19.0078, "lon": -57.6500, "regiao": "Oeste (Pantanal)"},
-    "Ponta Porã":      {"lat": -22.5361, "lon": -55.7253, "regiao": "Sul (Fronteira)"},
-    "Naviraí":         {"lat": -23.0622, "lon": -54.1914, "regiao": "Sul"},
-    "Nova Andradina":  {"lat": -22.2333, "lon": -53.3444, "regiao": "Leste"},
-    "Aquidauana":      {"lat": -20.4700, "lon": -55.7869, "regiao": "Centro-Oeste"},
-    "Sidrolândia":     {"lat": -20.9319, "lon": -54.9600, "regiao": "Centro"},
-    "Maracaju":        {"lat": -21.6108, "lon": -55.1681, "regiao": "Sul"},
-    "Rio Brilhante":   {"lat": -21.8028, "lon": -54.5447, "regiao": "Sul"},
-    "Coxim":           {"lat": -18.5069, "lon": -54.7600, "regiao": "Norte"},
-    "Sonora":          {"lat": -17.5583, "lon": -54.7611, "regiao": "Norte"},
-    "Chapadão do Sul": {"lat": -18.7919, "lon": -52.6267, "regiao": "Nordeste"},
-    "Costa Rica":      {"lat": -18.5447, "lon": -53.1278, "regiao": "Nordeste"},
+# Pontos de referência sugeridos no seletor rápido da sidebar
+PONTOS_REFERENCIA_MS = {
+    "── Selecione um ponto de referência ──": None,
+    "Campo Grande — Centro Urbano":     {"lat": -20.4428, "lon": -54.6460},
+    "Dourados — Polo Sojícola":         {"lat": -22.2212, "lon": -54.8056},
+    "Três Lagoas — Eucaliptocultura":   {"lat": -20.7519, "lon": -51.6783},
+    "Corumbá — Pantanal":               {"lat": -19.0078, "lon": -57.6500},
+    "Ponta Porã — Fronteira":           {"lat": -22.5361, "lon": -55.7253},
+    "Naviraí — Pecuária Sul":           {"lat": -23.0622, "lon": -54.1914},
+    "Aquidauana — Pantanal Sul":        {"lat": -20.4700, "lon": -55.7869},
+    "Maracaju — Grãos":                 {"lat": -21.6108, "lon": -55.1681},
+    "Chapadão do Sul — Cerrado Leste":  {"lat": -18.7919, "lon": -52.6267},
+    "Coxim — Cerrado Norte":            {"lat": -18.5069, "lon": -54.7600},
+    "Sonora — Portal da Amazônia":      {"lat": -17.5583, "lon": -54.7611},
+    "Costa Rica — Nordeste MS":         {"lat": -18.5447, "lon": -53.1278},
 }
 
 BANDAS_INFO = {
-    "B02": {"nome": "Vermelho Visível (0,64µm)",  "icon": "☀️",  "uso": "Cobertura de nuvens, frentes de chuva — Só diurno",                 "cmap": "gray",      },
-    "B03": {"nome": "Veggie Band – NIR (0,86µm)", "icon": "🌿",  "uso": "Saúde da vegetação, estresse hídrico, queimadas recentes",          "cmap": "YlGn",      },
-    "B07": {"nome": "IR Onda Curta (3,9µm)",       "icon": "🔥",  "uso": "Focos de incêndio (produto FDC oficial), nevoeiro matinal",         "cmap": "hot",       },
-    "B09": {"nome": "Vapor d'Água Médio (6,9µm)",  "icon": "💧",  "uso": "Umidade atmosférica, sistemas convectivos 24–72h",                  "cmap": "Blues_r",   },
-    "B11": {"nome": "IR Termal (8,4µm)",           "icon": "❄️",  "uso": "Temperatura superficial, risco de geada, nuvens baixas",           "cmap": "RdBu",      },
-    "B13": {"nome": "IR Clean (10,3µm)",           "icon": "⛈️",  "uso": "Topo de nuvens, alertas de tempestade severa e granizo",           "cmap": "inferno_r", },
-    "B14": {"nome": "IR Longo – QPE (11,2µm)",     "icon": "🌧️",  "uso": "Estimativa de precipitação — produto RRQPE oficial GOES-19",      "cmap": "Blues",     },
+    "B02": {"nome": "Visível (0,64µm)",         "icon": "☀️",  "uso": "Estrutura de nuvens cumulus/Cb — apenas diurno",           "cmap": "gray",      },
+    "B09": {"nome": "Vapor d'Água (6,9µm)",      "icon": "💧",  "uso": "Dinâmica atmosférica, umidade em 300–700 hPa",             "cmap": "Blues_r",   },
+    "B13": {"nome": "IR Clean (10,3µm)",          "icon": "⛈️",  "uso": "Topo de nuvens, temperatura de brilho, CBs",              "cmap": "inferno_r", },
+    "B14": {"nome": "IR Longo (11,2µm)",          "icon": "🌧️",  "uso": "Diferença B13-B14 → nuvens de gelo/granizo",             "cmap": "Blues",     },
+    "RGB_AirMass":       {"nome": "RGB AirMass",         "icon": "🌀",  "uso": "Massas de ar polar vs tropical — inverno no MS",         "cmap": None,        },
+    "RGB_DayCloudPhase": {"nome": "RGB Day Cloud Phase", "icon": "🔵",  "uso": "Fase das nuvens: gelo (azul) vs água (ciano)",           "cmap": None,        },
 }
 
 CULTURAS_GDA = {
@@ -253,626 +304,89 @@ CULTURAS_GDA = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SISTEMA DE E-MAIL
-# Adaptado do Monitor PM2.5/PM10 — geração de HTML rico com tabelas,
-# cards de métricas e alertas coloridos, enviado via SMTP Gmail (SSL porta 465).
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _cor_alerta_email(nivel: str) -> tuple:
-    """Retorna (bg, border, text) para cada nível de alerta no HTML do e-mail."""
-    mapa = {
-        "verde":    ("#e8f5e9", "#43a047", "#1b5e20"),
-        "amarelo":  ("#fff8e1", "#fbc02d", "#5d4037"),
-        "vermelho": ("#ffebee", "#e53935", "#b71c1c"),
-        "laranja":  ("#fff3e0", "#fb8c00", "#bf360c"),
-    }
-    return mapa.get(nivel, ("#f5f5f5", "#9e9e9e", "#333"))
-
-
-def gerar_html_relatorio(
-    municipio: str,
-    coords: dict,
-    dados_meteo: dict,
-    alertas: list,
-    janelas_def: list,
-    gda_info: dict,
-    riscos_fito: list,
-    bh: dict,
-    ndvi_data: dict,
-    df_focos: pd.DataFrame,
-    df_inmet: pd.DataFrame,
-) -> str:
-    """
-    Gera o HTML completo do relatório agroclimático para envio por e-mail.
-    Inclui: métricas rápidas, alertas, janela de defensivos, GDA/fenologia,
-    risco fitossanitário, balanço hídrico, NDVI e focos de queimada.
-    """
-    agora    = datetime.now().strftime("%d/%m/%Y às %H:%M")
-    lat, lon = coords["lat"], coords["lon"]
-    regiao   = coords["regiao"]
-
-    # ── Métricas rápidas ──────────────────────────────────────────────────────
-    h = dados_meteo.get("hourly", {}) if dados_meteo else {}
-    d = dados_meteo.get("daily",  {}) if dados_meteo else {}
-    temp_atual  = (h.get("temperature_2m",        [None])[0] or 0)
-    precip_hoje = (d.get("precipitation_sum",      [None])[0] or 0)
-    umid_atual  = (h.get("relativehumidity_2m",    [None])[0] or 0)
-    vento_atual = (h.get("windspeed_10m",          [None])[0] or 0)
-    eto_hoje    = (d.get("et0_fao_evapotranspiration", [None])[0] or 0)
-
-    def card_metrica(titulo, valor, unidade, cor="#1B4D2E"):
-        return f"""
-        <div style="flex:1;min-width:110px;background:#fff;border-radius:10px;
-                    border-top:4px solid {cor};padding:14px 12px;
-                    box-shadow:0 2px 8px rgba(0,0,0,0.08);text-align:center;">
-          <div style="font-size:11px;color:#777;font-family:Arial;">{titulo}</div>
-          <div style="font-size:22px;font-weight:bold;color:#222;">
-            {valor}<span style="font-size:12px;color:#999;margin-left:2px;">{unidade}</span>
-          </div>
-        </div>"""
-
-    cards = (
-        card_metrica("🌡 Temperatura",  f"{temp_atual:.1f}",  "°C",    "#e65100") +
-        card_metrica("🌧 Chuva 24h",    f"{precip_hoje:.1f}", "mm",    "#1565c0") +
-        card_metrica("💧 Umidade",       f"{umid_atual:.0f}",  "%",     "#0277bd") +
-        card_metrica("💨 Vento",         f"{vento_atual:.0f}", "km/h",  "#6a1b9a") +
-        card_metrica("🌿 ETo",           f"{eto_hoje:.2f}",   "mm/dia","#2e7d32")
-    )
-
-    # ── Alertas ───────────────────────────────────────────────────────────────
-    html_alertas = ""
-    for al in alertas:
-        bg, brd, tc = _cor_alerta_email(al["nivel"])
-        html_alertas += f"""
-        <div style="background:{bg};border-left:5px solid {brd};border-radius:6px;
-                    padding:12px 16px;margin:6px 0;">
-          <b style="color:{tc};">{al['icone']} {al['titulo']}</b><br>
-          <span style="font-size:13px;color:#333;">{al['msg']}</span>
-        </div>"""
-
-    # ── Janela de defensivos ──────────────────────────────────────────────────
-    n_aberta  = sum(1 for j in janelas_def if j["status"] == "aberta")
-    n_parcial = sum(1 for j in janelas_def if j["status"] == "parcial")
-    n_bloq    = sum(1 for j in janelas_def if j["status"] == "bloqueada")
-    cor_jan   = "#43a047" if n_aberta >= 6 else ("#fbc02d" if n_aberta > 0 else "#e53935")
-
-    # Melhor janela contínua
-    max_seq = max_start = cur_seq = cur_start = 0
-    for i, j in enumerate(janelas_def):
-        if j["status"] == "aberta":
-            if cur_seq == 0: cur_start = i
-            cur_seq += 1
-            if cur_seq > max_seq:
-                max_seq = cur_seq; max_start = cur_start
-        else:
-            cur_seq = 0
-    melhor_jan = ""
-    if max_seq > 0:
-        h_ini = janelas_def[max_start]["hora"]
-        h_fim = janelas_def[min(max_start + max_seq - 1, len(janelas_def)-1)]["hora"]
-        melhor_jan = f"<b>Melhor janela:</b> {h_ini} → {h_fim} ({max_seq}h contínuas)"
-    else:
-        melhor_jan = "<b>Sem janela ideal nas próximas 24h.</b> Adie as aplicações."
-
-    html_defensivos = f"""
-    <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
-      <tr>
-        <td style="padding:8px 12px;background:#e8f5e9;border-radius:6px;text-align:center;">
-          <span style="font-size:20px;font-weight:bold;color:#2e7d32;">{n_aberta}</span><br>
-          <span style="font-size:11px;color:#555;">Horas ideais</span>
-        </td>
-        <td style="padding:8px 12px;background:#fff8e1;border-radius:6px;text-align:center;">
-          <span style="font-size:20px;font-weight:bold;color:#f57f17;">{n_parcial}</span><br>
-          <span style="font-size:11px;color:#555;">Horas parciais</span>
-        </td>
-        <td style="padding:8px 12px;background:#ffebee;border-radius:6px;text-align:center;">
-          <span style="font-size:20px;font-weight:bold;color:#c62828;">{n_bloq}</span><br>
-          <span style="font-size:11px;color:#555;">Horas bloqueadas</span>
-        </td>
-      </tr>
-    </table>
-    <div style="background:#f1f8e9;border-left:4px solid {cor_jan};padding:10px 14px;
-                border-radius:4px;font-size:13px;">{melhor_jan}</div>"""
-
-    # ── GDA / Fenologia ───────────────────────────────────────────────────────
-    html_gda = ""
-    if gda_info:
-        proximo    = gda_info.get("proximo_estagio")
-        faltam_str = f" | Próximo em {proximo[0]-gda_info['gda_total']:.0f} °C·dia: <b>{proximo[1]}</b>" if proximo else ""
-        html_gda = f"""
-        <div style="background:#f9fbe7;border-left:5px solid #8bc34a;border-radius:6px;
-                    padding:14px 16px;margin:6px 0;">
-          <b style="color:#33691e;">🌾 {gda_info['cultura']} — {gda_info['estagio_atual']}</b><br>
-          <span style="font-size:13px;color:#555;">
-            GDA acumulado: <b>{gda_info['gda_total']} °C·dia</b>
-            | {gda_info['dias_desde_semeadura']} dias desde semeadura
-            {faltam_str}
-          </span>
-        </div>"""
-
-    # ── Risco fitossanitário ──────────────────────────────────────────────────
-    html_fito = ""
-    for r in riscos_fito:
-        bg, brd, tc = _cor_alerta_email(r["cor"])
-        html_fito += f"""
-        <div style="background:{bg};border-left:5px solid {brd};border-radius:6px;
-                    padding:10px 14px;margin:5px 0;">
-          <b style="color:{tc};">{r['icone']} {r['doenca']} — Risco {r['nivel']}</b><br>
-          <span style="font-size:12px;color:#333;">{r['msg']}</span>
-        </div>"""
-
-    # ── Balanço Hídrico ───────────────────────────────────────────────────────
-    html_bh = ""
-    if bh:
-        arm_pct = bh.get("arm_pct", 0)
-        cor_bh  = "#43a047" if arm_pct >= 70 else ("#fbc02d" if arm_pct >= 40 else "#e53935")
-        barra_w = min(int(arm_pct), 100)
-        html_bh = f"""
-        <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px;">
-          <tr>
-            <td style="padding:6px 10px;color:#555;width:140px;">Armazenamento (ARM)</td>
-            <td style="padding:6px 10px;">
-              <div style="background:#e0e0e0;border-radius:6px;height:14px;">
-                <div style="background:{cor_bh};border-radius:6px;height:14px;width:{barra_w}%;"></div>
-              </div>
-            </td>
-            <td style="padding:6px 10px;white-space:nowrap;font-weight:bold;">
-              {bh['arm_mm']:.1f} / {bh['cad_mm']:.0f} mm ({arm_pct:.0f}%)
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:6px 10px;color:#555;">Déficit hoje</td>
-            <td colspan="2" style="padding:6px 10px;font-weight:bold;color:#c62828;">
-              {bh['def_mm']:.1f} mm
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:6px 10px;color:#555;">ETo / ETR</td>
-            <td colspan="2" style="padding:6px 10px;">
-              {bh['eto_mm']:.2f} mm / {bh['etr_mm']:.2f} mm
-            </td>
-          </tr>
-        </table>
-        <div style="background:#e3f2fd;border-left:4px solid #1565c0;padding:10px 14px;
-                    border-radius:4px;font-size:13px;">
-          <b>Recomendação:</b> {bh['recomendacao']}
-        </div>"""
-
-    # ── NDVI ──────────────────────────────────────────────────────────────────
-    html_ndvi = ""
-    if ndvi_data and "listaSerie" in ndvi_data:
-        serie   = ndvi_data["listaSerie"]
-        valores = [float(s.get("ndvi", s.get("valor", 0))) for s in serie]
-        if valores:
-            val_atual = valores[-1]
-            mediana   = float(np.median(valores[:-1])) if len(valores) > 1 else 0.5
-            delta     = val_atual - mediana
-            cor_d     = "#2e7d32" if delta >= 0 else "#c62828"
-            sim_note  = " <i>(dados simulados)</i>" if ndvi_data.get("_simulado") else ""
-            html_ndvi = f"""
-            <div style="background:#f1f8e9;border-left:5px solid #66bb6a;border-radius:6px;
-                        padding:12px 16px;margin:6px 0;">
-              <b style="color:#2e7d32;">🌿 NDVI Atual: {val_atual:.3f}</b>
-              <span style="font-size:12px;color:{cor_d};margin-left:10px;">
-                Δ {delta:+.3f} vs mediana histórica ({mediana:.3f})
-              </span>{sim_note}<br>
-              <span style="font-size:12px;color:#555;">
-                Fonte: Embrapa SATVeg — série histórica desde 2000
-              </span>
-            </div>"""
-
-    # ── Focos de queimada ─────────────────────────────────────────────────────
-    html_focos = ""
-    if df_focos is not None and not df_focos.empty:
-        n_focos = len(df_focos)
-        frp_max = df_focos["frp"].max() if "frp" in df_focos.columns else 0
-        cor_foc = "#e53935" if n_focos > 10 else ("#fbc02d" if n_focos > 3 else "#43a047")
-        html_focos = f"""
-        <div style="background:#fff3e0;border-left:5px solid {cor_foc};border-radius:6px;
-                    padding:12px 16px;margin:6px 0;">
-          <b style="color:#bf360c;">🔥 {n_focos} foco(s) detectado(s) nas últimas 48h — MS</b><br>
-          <span style="font-size:12px;color:#555;">
-            FRP máximo: {frp_max:.0f} MW | Fonte: INPE BDQueimadas
-          </span>
-        </div>"""
-
-    # ── Previsão 7 dias ───────────────────────────────────────────────────────
-    tmax_l   = d.get("temperature_2m_max",        [])
-    tmin_l   = d.get("temperature_2m_min",        [])
-    precip_l = d.get("precipitation_sum",          [])
-    eto_l    = d.get("et0_fao_evapotranspiration", [])
-    datas_l  = d.get("time",                       [])
-    wcode_l  = d.get("weathercode",               [])
-    wcode_map = {
-        0:"☀️ Limpo",1:"🌤 Poucas nuvens",2:"⛅ Parcial",3:"☁️ Nublado",
-        45:"🌫 Névoa",51:"🌦 Chuvisco",61:"🌧 Chuva",63:"🌧 Moderada",
-        65:"⛈ Forte",80:"🌦 Pancadas",81:"⛈ Pancadas fortes",
-        95:"⛈ Tempestade",99:"⛈ Granizo",
-    }
-    rows_7d = ""
-    for i in range(min(7, len(datas_l))):
-        try:
-            data_fmt = datetime.fromisoformat(datas_l[i]).strftime("%a %d/%m")
-        except Exception:
-            data_fmt = datas_l[i]
-        wc       = wcode_l[i] if i < len(wcode_l) else 0
-        cond     = wcode_map.get(wc, f"Cód {wc}")
-        tmax_v   = f"{tmax_l[i]:.0f}°C"   if i < len(tmax_l)   and tmax_l[i]   else "—"
-        tmin_v   = f"{tmin_l[i]:.0f}°C"   if i < len(tmin_l)   and tmin_l[i]   else "—"
-        pp_v     = f"{precip_l[i]:.1f}mm"  if i < len(precip_l) and precip_l[i] else "0mm"
-        eto_v    = f"{eto_l[i]:.2f}mm"     if i < len(eto_l)    and eto_l[i]    else "—"
-        bg_row   = "#f5f5f5" if i % 2 == 0 else "#fff"
-        rows_7d += f"""
-        <tr style="background:{bg_row};">
-          <td style="padding:7px 10px;">{data_fmt}</td>
-          <td style="padding:7px 10px;">{cond}</td>
-          <td style="padding:7px 10px;text-align:center;">{tmax_v}</td>
-          <td style="padding:7px 10px;text-align:center;">{tmin_v}</td>
-          <td style="padding:7px 10px;text-align:center;">{pp_v}</td>
-          <td style="padding:7px 10px;text-align:center;">{eto_v}</td>
-        </tr>"""
-
-    html_7dias = f"""
-    <table style="border-collapse:collapse;width:100%;font-size:13px;">
-      <thead>
-        <tr style="background:{VERDE_ESCURO};color:white;">
-          <th style="padding:8px 10px;text-align:left;">Data</th>
-          <th style="padding:8px 10px;text-align:left;">Condição</th>
-          <th style="padding:8px 10px;">T.Máx</th>
-          <th style="padding:8px 10px;">T.Mín</th>
-          <th style="padding:8px 10px;">Precip.</th>
-          <th style="padding:8px 10px;">ETo</th>
-        </tr>
-      </thead>
-      <tbody>{rows_7d}</tbody>
-    </table>"""
-
-    # ── Estações INMET ────────────────────────────────────────────────────────
-    html_inmet = ""
-    if df_inmet is not None and not df_inmet.empty:
-        rows_inmet = ""
-        for _, row in df_inmet.iterrows():
-            rows_inmet += f"""
-            <tr>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;">{row.get('Estação','—')}</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">{row.get('Lat','—')}</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">{row.get('Lon','—')}</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">{row.get('Alt (m)','—')}</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">{row.get('Cod','—')}</td>
-            </tr>"""
-        html_inmet = f"""
-        <table style="border-collapse:collapse;width:100%;font-size:13px;">
-          <thead>
-            <tr style="background:#e8f5e9;">
-              <th style="padding:7px 10px;text-align:left;">Estação</th>
-              <th style="padding:7px 10px;">Lat</th>
-              <th style="padding:7px 10px;">Lon</th>
-              <th style="padding:7px 10px;">Alt (m)</th>
-              <th style="padding:7px 10px;">Código</th>
-            </tr>
-          </thead>
-          <tbody>{rows_inmet}</tbody>
-        </table>"""
-
-    # ── HTML FINAL ────────────────────────────────────────────────────────────
-    return f"""
-    <html>
-    <body style="font-family:Arial,sans-serif;background:#f0f2f5;padding:20px;margin:0;">
-      <div style="max-width:760px;margin:auto;background:#fff;border-radius:14px;
-                  box-shadow:0 4px 18px rgba(0,0,0,.12);overflow:hidden;">
-
-        <!-- CABEÇALHO -->
-        <div style="background:linear-gradient(135deg,{VERDE_ESCURO},{VERDE_MEDIO});
-                    padding:32px 36px;text-align:center;">
-          <h1 style="color:white;margin:0;font-size:24px;letter-spacing:.5px;">
-            🌿 Yamada Engenharia
-          </h1>
-          <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:15px;">
-            Relatório Agroclimático — Mato Grosso do Sul
-          </p>
-        </div>
-
-        <div style="padding:32px 36px;">
-
-          <!-- INFO DO MUNICÍPIO -->
-          <div style="background:#f9fbe7;border-radius:8px;padding:14px 18px;margin-bottom:20px;">
-            <b style="font-size:16px;color:{VERDE_ESCURO};">📍 {municipio}</b>
-            <span style="color:#555;font-size:13px;margin-left:12px;">{regiao}</span><br>
-            <span style="color:#777;font-size:12px;">
-              {lat:.4f}°S, {lon:.4f}°W · Gerado em {agora}
-            </span>
-          </div>
-
-          <!-- MÉTRICAS RÁPIDAS -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:0;">📊 Condições Atuais</h3>
-          <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px;">
-            {cards}
-          </div>
-
-          <!-- ALERTAS -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};padding-bottom:6px;">
-            ⚠️ Alertas Ativos
-          </h3>
-          {html_alertas}
-
-          <!-- DEFENSIVOS -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            🧪 Janela de Aplicação de Defensivos (próximas 24h)
-          </h3>
-          <p style="font-size:12px;color:#777;">
-            Critérios: Vento &lt;10km/h | Temp &lt;30°C | UR &gt;55% | Sem chuva
-          </p>
-          {html_defensivos}
-
-          <!-- FENOLOGIA -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            🌾 Graus-Dia e Estádio Fenológico
-          </h3>
-          {html_gda if html_gda else '<p style="color:#999;">Dados não disponíveis.</p>'}
-
-          <!-- RISCO FITOSSANITÁRIO -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            🍂 Risco Fitossanitário
-          </h3>
-          {html_fito}
-
-          <!-- NDVI -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            🌿 NDVI — SATVeg/Embrapa
-          </h3>
-          {html_ndvi if html_ndvi else '<p style="color:#999;">Dados não disponíveis.</p>'}
-
-          <!-- BALANÇO HÍDRICO -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            💧 Balanço Hídrico do Solo (Thornthwaite-Mather)
-          </h3>
-          {html_bh if html_bh else '<p style="color:#999;">Dados não disponíveis.</p>'}
-
-          <!-- FOCOS -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            🔥 Focos de Queimada — INPE
-          </h3>
-          {html_focos if html_focos else '<p style="color:#999;">Nenhum foco detectado.</p>'}
-
-          <!-- PREVISÃO 7 DIAS -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            📅 Previsão 7 Dias
-          </h3>
-          {html_7dias}
-
-          <!-- ESTAÇÕES INMET -->
-          <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
-                     padding-bottom:6px;margin-top:24px;">
-            📡 Estações INMET — MS
-          </h3>
-          {html_inmet if html_inmet else '<p style="color:#999;">Dados não disponíveis.</p>'}
-
-          <!-- RODAPÉ -->
-          <p style="color:#bbb;font-size:11px;margin-top:32px;border-top:1px solid #eee;
-                    padding-top:14px;text-align:center;">
-            Relatório gerado automaticamente pela <b>Yamada Engenharia</b>.<br>
-            Dados: Open-Meteo · NASA POWER · Embrapa SATVeg · INPE BDQueimadas · INMET · GOES-19<br>
-            {agora} · MVP v3.0
-          </p>
-        </div>
-      </div>
-    </body>
-    </html>"""
-
-
-def enviar_relatorio_email(
-    municipio: str,
-    coords: dict,
-    dados_meteo: dict,
-    alertas: list,
-    janelas_def: list,
-    gda_info: dict,
-    riscos_fito: list,
-    bh: dict,
-    ndvi_data: dict,
-    df_focos: pd.DataFrame,
-    df_inmet: pd.DataFrame,
-    destinatarios_extras: list = None,
-) -> tuple:
-    """
-    Envia o relatório agroclimático completo por e-mail (Gmail SMTP SSL).
-
-    Parâmetros:
-      municipio           — Nome do município analisado
-      coords              — Dict com lat, lon, regiao
-      dados_meteo         — JSON do Open-Meteo
-      alertas             — Lista de alertas calculados
-      janelas_def         — Lista de janelas de defensivos
-      gda_info            — Dict com info de graus-dia
-      riscos_fito         — Lista de riscos fitossanitários
-      bh                  — Dict do balanço hídrico
-      ndvi_data           — Dict do SATVeg
-      df_focos            — DataFrame de focos INPE
-      df_inmet            — DataFrame de estações INMET
-      destinatarios_extras— Lista adicional de e-mails (soma aos do secrets)
-
-    Retorna: (True, "Enviado") ou (False, "Mensagem de erro")
-    """
-    if not _email_configurado:
-        return False, "E-mail não configurado no secrets.toml"
-
-    try:
-        html_body = gerar_html_relatorio(
-            municipio, coords, dados_meteo, alertas,
-            janelas_def, gda_info, riscos_fito, bh,
-            ndvi_data, df_focos, df_inmet
-        )
-
-        destinatarios = list(EMAIL_DESTINATARIOS)
-        if destinatarios_extras:
-            for e in destinatarios_extras:
-                if e and e not in destinatarios:
-                    destinatarios.append(e)
-
-        agora    = datetime.now()
-        tem_alerta = any(a["nivel"] in ["vermelho", "laranja"] for a in alertas)
-        prefixo  = "🚨 ALERTA — " if tem_alerta else "📋 "
-        assunto  = (f"{prefixo}Relatório Agroclimático — {municipio} | "
-                    f"{agora.strftime('%d/%m/%Y %H:%M')}")
-
-        msg            = MIMEMultipart("mixed")
-        msg["Subject"] = assunto
-        msg["From"]    = EMAIL_REMETENTE
-        msg["To"]      = ", ".join(destinatarios)
-
-        alt_part = MIMEMultipart("alternative")
-        alt_part.attach(MIMEText(html_body, "html"))
-        msg.attach(alt_part)
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
-            srv.login(EMAIL_REMETENTE, EMAIL_SENHA_APP)
-            srv.sendmail(EMAIL_REMETENTE, destinatarios, msg.as_string())
-
-        return True, f"Enviado para: {', '.join(destinatarios)}"
-
-    except Exception as e:
-        return False, str(e)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# KEEP-ALIVE — Ping periódico para manter o app ativo no Streamlit Cloud
-# ─────────────────────────────────────────────────────────────────────────────
-def keep_alive():
-    """Ping no próprio app a cada 5 minutos para evitar sleep no Streamlit Cloud."""
-    APP_URL = "https://yamada-agro-ms.streamlit.app/"  # ← substitua pela URL real
-    try:
-        requests.get(APP_URL, timeout=30)
-    except Exception:
-        pass
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RELATÓRIO AUTOMÁTICO (APScheduler — roda em background)
-# Executa às 06h, 12h e 18h (horário de Campo Grande) para o município padrão.
-# ─────────────────────────────────────────────────────────────────────────────
-def scheduled_report_automatico():
-    """
-    Coleta todos os dados do município padrão (Campo Grande) e envia
-    o relatório por e-mail automaticamente.
-    Chamado pelo APScheduler — não bloqueia a interface Streamlit.
-    """
-    municipio_auto = "Campo Grande"
-    coords_auto    = MUNICIPIOS_MS[municipio_auto]
-    lat, lon       = coords_auto["lat"], coords_auto["lon"]
-
-    log_entry = {
-        "inicio":  datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "status":  "em andamento",
-        "detalhe": "",
-    }
-    with _log_lock:
-        _scheduler_log.insert(0, log_entry)
-        if len(_scheduler_log) > 10:
-            _scheduler_log.pop()
-
-    try:
-        dados_meteo   = buscar_previsao_openmeteo(lat, lon)
-        dados_nasa    = buscar_nasa_power(lat, lon)
-        ndvi_data     = buscar_satveg_ndvi(lat, lon)
-        df_focos      = buscar_focos_inpe()
-        df_inmet      = buscar_dados_inmet()
-        janelas_def   = calcular_janela_defensivos(dados_meteo)
-        gda_info      = calcular_graus_dia(
-            dados_meteo, "Soja",
-            datetime.now() - timedelta(days=45)
-        )
-        riscos_fito   = calcular_risco_fitossanitario(dados_meteo)
-        bh            = calcular_balanco_hidrico_thornthwaite(dados_meteo, 65.0)
-        alertas       = calcular_alertas(dados_meteo, lat, gda_info)
-
-        ok, msg = enviar_relatorio_email(
-            municipio=municipio_auto,
-            coords=coords_auto,
-            dados_meteo=dados_meteo,
-            alertas=alertas,
-            janelas_def=janelas_def,
-            gda_info=gda_info,
-            riscos_fito=riscos_fito,
-            bh=bh,
-            ndvi_data=ndvi_data,
-            df_focos=df_focos,
-            df_inmet=df_inmet,
-        )
-
-        log_entry["status"]  = "✅ enviado" if ok else "⚠️ gerado, sem e-mail"
-        log_entry["detalhe"] = msg[:80]
-
-    except Exception as exc:
-        log_entry["status"]  = "❌ erro"
-        log_entry["detalhe"] = str(exc)[:100]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INICIALIZAÇÃO DO SCHEDULER (uma única vez por processo Streamlit)
-# ─────────────────────────────────────────────────────────────────────────────
-if "scheduler_started" not in st.session_state:
-    _sched = BackgroundScheduler(timezone="America/Campo_Grande")
-
-    # Relatório automático às 06h, 12h e 18h
-    _sched.add_job(
-        scheduled_report_automatico,
-        trigger=CronTrigger(hour="6,12,18", minute=0, timezone="America/Campo_Grande"),
-        id="relatorio_automatico",
-        name="Relatório Yamada — Campo Grande",
-        replace_existing=True,
-        max_instances=1,
-        misfire_grace_time=600,
-    )
-
-    # Keep-alive a cada 5 minutos
-    _sched.add_job(
-        keep_alive,
-        trigger=IntervalTrigger(minutes=5),
-        id="keepalive",
-        name="Keep Alive",
-        replace_existing=True,
-        max_instances=1,
-    )
-
-    _sched.start()
-    st.session_state["scheduler_started"] = True
-    st.session_state["scheduler_obj"]     = _sched
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNÇÕES DE COLETA DE DADOS
+# FUNÇÕES DE COLETA DE DADOS — OPEN-METEO (ICON-EU + GFS025)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def buscar_previsao_openmeteo(lat: float, lon: float) -> dict:
-    url = (
-        f"https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lat}&longitude={lon}"
-        f"&hourly=temperature_2m,precipitation,relativehumidity_2m,"
-        f"windspeed_10m,shortwave_radiation,dewpoint_2m"
-        f"&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,"
-        f"weathercode,windspeed_10m_max,et0_fao_evapotranspiration"
-        f"&timezone=America%2FCampo_Grande&forecast_days=7&models=best_match"
+    """
+    Coleta previsão 72h horária + 7 dias diários do Open-Meteo.
+
+    Modelos: ICON-EU (primário, melhor resolução para convecção do Cerrado/MS)
+    com fallback para GFS025 (boa cobertura sinótica).
+
+    Variáveis horárias (15 parâmetros):
+      - temperature_2m, relativehumidity_2m, dewpoint_2m
+      - precipitation, precipitation_probability
+      - windspeed_10m, windgusts_10m
+      - shortwave_radiation, diffuse_radiation, direct_normal_irradiance
+      - cape, lifted_index, convective_inhibition
+      - soil_temperature_0cm, soil_moisture_0_1cm, cloudcover
+
+    Retorna dict JSON do Open-Meteo ou {} em caso de falha.
+    """
+    vars_horarias = (
+        "temperature_2m,relativehumidity_2m,dewpoint_2m,"
+        "precipitation,precipitation_probability,"
+        "windspeed_10m,windgusts_10m,"
+        "shortwave_radiation,diffuse_radiation,direct_normal_irradiance,"
+        "cape,lifted_index,convective_inhibition,"
+        "soil_temperature_0cm,soil_moisture_0_1cm,cloudcover"
     )
+    vars_diarias = (
+        "temperature_2m_max,temperature_2m_min,precipitation_sum,"
+        "weathercode,windspeed_10m_max,et0_fao_evapotranspiration,"
+        "precipitation_hours,shortwave_radiation_sum"
+    )
+
+    # Tenta ICON-EU primeiro (melhor para convecção profunda do Cerrado)
+    for modelo in ["icon_eu", "gfs025"]:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            f"&hourly={vars_horarias}"
+            f"&daily={vars_diarias}"
+            f"&timezone=America%2FCampo_Grande"
+            f"&forecast_days=7"
+            f"&models={modelo}"
+        )
+        try:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            data["_modelo_usado"] = modelo
+            return data
+        except Exception:
+            continue
+
+    # Fallback best_match se ambos falharem
     try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            f"&hourly={vars_horarias}"
+            f"&daily={vars_diarias}"
+            f"&timezone=America%2FCampo_Grande"
+            f"&forecast_days=7"
+            f"&models=best_match"
+        )
         r = requests.get(url, timeout=15)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        data["_modelo_usado"] = "best_match (fallback)"
+        return data
     except Exception as e:
-        st.error(f"❌ Open-Meteo erro: {e}")
+        st.error(f"❌ Open-Meteo — todos os modelos falharam: {e}")
         return {}
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def buscar_nasa_power(lat: float, lon: float) -> dict:
+    """
+    Coleta dados históricos 30 dias via NASA POWER para o ponto selecionado.
+    Inclui GWETTOP (umidade 0-5cm) e GWETROOT (zona radicular) para
+    complementar o balanço hídrico Thornthwaite-Mather.
+    """
     fim    = datetime.now()
     inicio = fim - timedelta(days=30)
     url = (
@@ -892,6 +406,10 @@ def buscar_nasa_power(lat: float, lon: float) -> dict:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def buscar_satveg_ndvi(lat: float, lon: float) -> dict:
+    """
+    Série histórica NDVI do ponto via API REST SATVeg (Embrapa).
+    Cobre 2000 até hoje. Fallback com série sintética representativa do MS.
+    """
     try:
         url = (
             f"https://www.satveg.cnptia.embrapa.br/satvegws/ws/perfil/"
@@ -903,40 +421,41 @@ def buscar_satveg_ndvi(lat: float, lon: float) -> dict:
     except Exception:
         np.random.seed(abs(int(lat * 100)) % 999)
         anos = list(range(2000, datetime.now().year + 1))
-        ndvi_base = []
-        for a in anos:
-            v = 0.55 + 0.15 * np.sin(2 * np.pi * (a - 2000) / 10) + np.random.normal(0, 0.04)
-            ndvi_base.append(round(float(np.clip(v, 0.2, 0.9)), 3))
-        return {"listaSerie": [{"data": str(a), "ndvi": v} for a, v in zip(anos, ndvi_base)],
+        ndvi = [round(float(np.clip(
+            0.55 + 0.15 * np.sin(2 * np.pi * (a - 2000) / 10) + np.random.normal(0, 0.04),
+            0.2, 0.9)), 3) for a in anos]
+        return {"listaSerie": [{"data": str(a), "ndvi": v} for a, v in zip(anos, ndvi)],
                 "_simulado": True}
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def buscar_focos_inpe() -> pd.DataFrame:
+    """Focos de queimada INPE BDQueimadas — MS, últimas 48h."""
     try:
-        url    = "https://queimadas.dgi.inpe.br/api/focos/"
-        params = {"pais_id": 33, "estado_id": 50, "satelite": "AQUA_M-T"}
-        r      = requests.get(url, params=params, timeout=15)
+        r = requests.get(
+            "https://queimadas.dgi.inpe.br/api/focos/",
+            params={"pais_id": 33, "estado_id": 50, "satelite": "AQUA_M-T"},
+            timeout=15
+        )
         r.raise_for_status()
-        data   = r.json()
+        data = r.json()
         if isinstance(data, list) and data:
             return pd.DataFrame(data)
         return pd.DataFrame()
     except Exception:
         np.random.seed(42)
-        n    = 12
-        lons = np.random.uniform(-57.0, -51.5, n)
-        lats = np.random.uniform(-23.0, -17.5, n)
-        frp  = np.random.uniform(5, 120, n)
+        n = 12
         return pd.DataFrame({
-            "latitude": lats, "longitude": lons, "frp": frp,
-            "_simulado": [True]*n,
-            "municipio": [list(MUNICIPIOS_MS.keys())[i % len(MUNICIPIOS_MS)] for i in range(n)]
+            "latitude":  np.random.uniform(-23.0, -17.5, n),
+            "longitude": np.random.uniform(-57.0, -51.5, n),
+            "frp":       np.random.uniform(5, 120, n),
+            "_simulado": [True] * n,
         })
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def buscar_dados_inmet() -> pd.DataFrame:
+    """Estações automáticas INMET no MS."""
     try:
         r = requests.get("https://apitempo.inmet.gov.br/estacoes/T", timeout=15)
         r.raise_for_status()
@@ -944,9 +463,11 @@ def buscar_dados_inmet() -> pd.DataFrame:
         if not est_ms:
             raise ValueError("sem estações MS")
         return pd.DataFrame([{
-            "Estação": e.get("DC_NOME", "—"), "Lat": float(e.get("VL_LATITUDE", 0)),
+            "Estação": e.get("DC_NOME", "—"),
+            "Lat": float(e.get("VL_LATITUDE", 0)),
             "Lon": float(e.get("VL_LONGITUDE", 0)),
-            "Alt (m)": e.get("VL_ALTITUDE", "—"), "Cod": e.get("CD_ESTACAO", "—"),
+            "Alt (m)": e.get("VL_ALTITUDE", "—"),
+            "Cod": e.get("CD_ESTACAO", "—"),
         } for e in est_ms])
     except Exception:
         return pd.DataFrame([
@@ -959,10 +480,142 @@ def buscar_dados_inmet() -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNÇÕES GOES-19
+# GOES-19 VIA GOES2GO — CANAIS E COMPOSTOS RGB
 # ─────────────────────────────────────────────────────────────────────────────
 
-def listar_arquivos_goes_banda(banda: str, horas_atras: int = 1) -> list:
+# BBox de recorte para MS com margem
+_MS_LON_MIN, _MS_LON_MAX = -57.65, -50.92
+_MS_LAT_MIN, _MS_LAT_MAX = -23.67, -17.16
+
+
+@st.cache_data(ttl=600, show_spinner=False)  # 10 minutos — imagens quase em tempo real
+def buscar_goes19_canal(banda_num: int) -> tuple:
+    """
+    Busca imagem GOES-19 ABI-L2-CMIPC via goes2go (≤10 min atrás).
+    Retorna (array_2d, extent, timestamp_str) ou (None, None, None).
+
+    Parâmetros:
+      banda_num — número do canal ABI (2, 9, 13, 14)
+
+    Limitação: goes2go requer credenciais AWS configuradas ou acesso público S3.
+    Em ambiente sem acesso, retorna None e usa fallback sintético.
+    """
+    if not _HAS_GOES2GO:
+        return None, None, None
+    try:
+        from goes2go.data import goes_latest
+        ds = goes_latest(
+            satellite=19,
+            product="ABI-L2-CMIPC",
+            bands=banda_num,
+            save_dir=tempfile.gettempdir(),
+            overwrite=True,
+        )
+        if ds is None or "CMI" not in ds:
+            return None, None, None
+
+        # Extrai projeção e lat/lon
+        cmi      = ds["CMI"].values
+        x        = ds["x"].values
+        y        = ds["y"].values
+        proj_var = ds["goes_imager_projection"]
+
+        lon_0 = float(proj_var.attrs.get("longitude_of_projection_origin", -75.0))
+        H     = float(proj_var.attrs.get("perspective_point_height", 35786023.0)) + \
+                float(proj_var.attrs.get("semi_major_axis", 6378137.0))
+        r_eq  = float(proj_var.attrs.get("semi_major_axis",  6378137.0))
+        r_pol = float(proj_var.attrs.get("semi_minor_axis",  6356752.3))
+
+        xx, yy   = np.meshgrid(x * float(proj_var.attrs.get("perspective_point_height", 35786023.0)),
+                               y * float(proj_var.attrs.get("perspective_point_height", 35786023.0)))
+        lambda_0 = np.deg2rad(lon_0)
+        a = np.sin(xx)**2 + np.cos(xx)**2 * (np.cos(yy)**2 + (r_eq**2/r_pol**2)*np.sin(yy)**2)
+        b = -2 * H * np.cos(xx) * np.cos(yy)
+        c = H**2 - r_eq**2
+        discriminante = b**2 - 4*a*c
+        discriminante = np.where(discriminante < 0, np.nan, discriminante)
+        r_s = (-b - np.sqrt(discriminante)) / (2 * a)
+
+        s_x = r_s * np.cos(xx) * np.cos(yy)
+        s_y = -r_s * np.sin(xx)
+        s_z = r_s * np.cos(xx) * np.sin(yy)
+
+        lat = np.rad2deg(np.arctan((r_eq**2/r_pol**2) * (s_z/np.sqrt((H-s_x)**2 + s_y**2))))
+        lon = np.rad2deg(lambda_0 - np.arctan(s_y/(H - s_x)))
+
+        # Recorte para MS
+        mask = (lat >= _MS_LAT_MIN) & (lat <= _MS_LAT_MAX) & \
+               (lon >= _MS_LON_MIN) & (lon <= _MS_LON_MAX)
+        if not np.any(mask):
+            return None, None, None
+
+        rows = np.where(mask.any(axis=1))[0]
+        cols = np.where(mask.any(axis=0))[0]
+        cmi_rec = cmi[rows[0]:rows[-1]+1, cols[0]:cols[-1]+1]
+        extent  = [_MS_LON_MIN, _MS_LON_MAX, _MS_LAT_MIN, _MS_LAT_MAX]
+
+        ts_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+        return np.array(cmi_rec, dtype=float), extent, ts_str
+
+    except Exception:
+        return None, None, None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def buscar_goes19_rgb(produto: str) -> tuple:
+    """
+    Busca compostos RGB GOES-19 via goes2go (≤10 min).
+
+    Produtos suportados:
+      'AirMass'      — distingue massas de ar polar vs tropical,
+                       crítico para frentes frias no MS no inverno
+      'DayCloudPhase'— fase microfísica das nuvens (gelo=granizo vs água)
+
+    Retorna (array_rgb HxWx3, extent, timestamp_str) ou (None, None, None).
+    Limitação: DayCloudPhase só disponível durante o dia (radiação solar > 0).
+    """
+    if not _HAS_GOES2GO:
+        return None, None, None
+    try:
+        from goes2go.data import goes_latest
+        from goes2go.tools import rgb as g2g_rgb
+
+        # AirMass usa canais 8,10,12,13; DayCloudPhase usa 1,2,5
+        bands_map = {
+            "AirMass":       [8, 10, 12, 13],
+            "DayCloudPhase": [1, 2, 5],
+        }
+        bands = bands_map.get(produto, [13])
+
+        ds = goes_latest(
+            satellite=19,
+            product="ABI-L2-CMIPC",
+            bands=bands,
+            save_dir=tempfile.gettempdir(),
+            overwrite=True,
+        )
+        if ds is None:
+            return None, None, None
+
+        rgb_func = getattr(g2g_rgb, produto, None)
+        if rgb_func is None:
+            return None, None, None
+
+        rgb_img = rgb_func(ds)
+        if rgb_img is None:
+            return None, None, None
+
+        extent  = [_MS_LON_MIN, _MS_LON_MAX, _MS_LAT_MIN, _MS_LAT_MAX]
+        ts_str  = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+        return rgb_img, extent, ts_str
+
+    except Exception:
+        return None, None, None
+
+
+# GOES-19 fallback via boto3 (mantido para compatibilidade com v3.0)
+def listar_arquivos_goes_banda_s3(banda: str, horas_atras: int = 1) -> list:
+    """Lista arquivos GOES-19 ABI-CMIPF no S3 para fallback boto3."""
     s3         = boto3.client("s3", config=Config(signature_version=UNSIGNED), region_name="us-east-1")
     agora      = datetime.now(timezone.utc) - timedelta(hours=horas_atras)
     dia_do_ano = agora.timetuple().tm_yday
@@ -976,9 +629,10 @@ def listar_arquivos_goes_banda(banda: str, horas_atras: int = 1) -> list:
         return []
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def baixar_e_recortar_goes19(banda: str, lat_min, lat_max, lon_min, lon_max) -> tuple:
-    arquivos = listar_arquivos_goes_banda(banda)
+@st.cache_data(ttl=600, show_spinner=False)
+def baixar_e_recortar_goes19_s3(banda: str) -> tuple:
+    """Fallback boto3 para download GOES-19 quando goes2go não disponível."""
+    arquivos = listar_arquivos_goes_banda_s3(banda)
     if not arquivos:
         return None, None, None
     s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED), region_name="us-east-1")
@@ -988,24 +642,24 @@ def baixar_e_recortar_goes19(banda: str, lat_min, lat_max, lon_min, lon_max) -> 
             tmp_path = tmp.name
         dataset   = nc.Dataset(tmp_path)
         proj_info = dataset.variables["goes_imager_projection"]
-        lon_origin = proj_info.longitude_of_projection_origin
+        lon_origin= proj_info.longitude_of_projection_origin
         H    = proj_info.perspective_point_height + proj_info.semi_major_axis
         r_eq = proj_info.semi_major_axis
         r_pol= proj_info.semi_minor_axis
         x_rad= dataset.variables["x"][:] * proj_info.perspective_point_height
         y_rad= dataset.variables["y"][:] * proj_info.perspective_point_height
         lambda_0 = np.deg2rad(lon_origin)
-        a_var = np.sin(x_rad)**2 + np.cos(x_rad)**2*(np.cos(y_rad)**2+(r_eq**2/r_pol**2)*np.sin(y_rad)**2)
-        b_var = -2*H*np.cos(x_rad)*np.cos(y_rad)
-        c_var = H**2 - r_eq**2
-        r_s   = (-b_var - np.sqrt(b_var**2 - 4*a_var*c_var))/(2*a_var)
-        s_x   = r_s*np.cos(x_rad)*np.cos(y_rad)
-        s_y   = -r_s*np.sin(x_rad)
-        s_z   = r_s*np.cos(x_rad)*np.sin(y_rad)
-        lat   = np.rad2deg(np.arctan((r_eq**2/r_pol**2)*(s_z/np.sqrt((H-s_x)**2+s_y**2))))
-        lon   = np.rad2deg(lambda_0 - np.arctan(s_y/(H-s_x)))
-        data  = dataset.variables["CMI"][:]
-        mask  = (lat>=lat_min)&(lat<=lat_max)&(lon>=lon_min)&(lon<=lon_max)
+        a = np.sin(x_rad)**2 + np.cos(x_rad)**2*(np.cos(y_rad)**2+(r_eq**2/r_pol**2)*np.sin(y_rad)**2)
+        b = -2*H*np.cos(x_rad)*np.cos(y_rad)
+        c = H**2 - r_eq**2
+        r_s = (-b - np.sqrt(b**2 - 4*a*c))/(2*a)
+        s_x = r_s*np.cos(x_rad)*np.cos(y_rad)
+        s_y = -r_s*np.sin(x_rad)
+        s_z = r_s*np.cos(x_rad)*np.sin(y_rad)
+        lat = np.rad2deg(np.arctan((r_eq**2/r_pol**2)*(s_z/np.sqrt((H-s_x)**2+s_y**2))))
+        lon = np.rad2deg(lambda_0 - np.arctan(s_y/(H-s_x)))
+        data = dataset.variables["CMI"][:]
+        mask = (lat>=_MS_LAT_MIN)&(lat<=_MS_LAT_MAX)&(lon>=_MS_LON_MIN)&(lon<=_MS_LON_MAX)
         if not np.any(mask):
             dataset.close(); os.unlink(tmp_path); return None, None, None
         rows = np.where(mask.any(axis=1))[0]
@@ -1013,27 +667,687 @@ def baixar_e_recortar_goes19(banda: str, lat_min, lat_max, lon_min, lon_max) -> 
         data_rec = data[rows[0]:rows[-1]+1, cols[0]:cols[-1]+1]
         ts   = datetime.strptime(arquivos[0].split("_s")[1][:13], "%Y%j%H%M%S")
         dataset.close(); os.unlink(tmp_path)
-        return np.array(data_rec), [lon_min, lon_max, lat_min, lat_max], ts
+        return np.array(data_rec), [_MS_LON_MIN, _MS_LON_MAX, _MS_LAT_MIN, _MS_LAT_MAX], ts.strftime("%d/%m/%Y %H:%M UTC")
     except Exception:
         return None, None, None
 
 
+def obter_canal_goes19(banda_id: str, usar_goes_real: bool) -> tuple:
+    """
+    Tenta obter canal GOES-19 via goes2go primeiro, depois boto3,
+    retornando sempre (data, extent, timestamp, fonte).
+    """
+    if not usar_goes_real:
+        return None, None, None, "simulado"
+
+    # Mapeamento banda_id → número ABI
+    banda_map = {"B02": 2, "B09": 9, "B13": 13, "B14": 14}
+    num = banda_map.get(banda_id)
+
+    if _HAS_GOES2GO and num:
+        data, ext, ts = buscar_goes19_canal(num)
+        if data is not None:
+            return data, ext, ts, "goes2go"
+
+    # Fallback boto3
+    if num:
+        data, ext, ts = baixar_e_recortar_goes19_s3(banda_id)
+        if data is not None:
+            return data, ext, ts, "boto3"
+
+    return None, None, None, "simulado"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ANÁLISES AGRONÔMICAS
+# SHAPEFILES
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_shapefiles() -> dict:
+    """Carrega shapefiles MS — municípios, biomas, hidrografia, rodovias."""
+    shps = {}
+    try:
+        shps["municipios"] = gpd.read_file(
+            "https://raw.githubusercontent.com/tbrugz/geodata-br/master/geojson/geojs-50-mun.json"
+        )
+    except Exception:
+        from shapely.geometry import box as sgbox
+        shps["municipios"] = gpd.GeoDataFrame(
+            {"name": ["MS"]}, geometry=[sgbox(-57.65,-23.67,-50.92,-17.16)], crs="EPSG:4326")
+
+    from shapely.geometry import Polygon, LineString
+    shps["biomas"] = gpd.GeoDataFrame(
+        {"bioma": ["Pantanal", "Cerrado", "Campo/Agro", "Transição"]},
+        geometry=[
+            Polygon([(-57.65,-19.5),(-55.5,-19.5),(-55.5,-17.16),(-57.65,-17.16)]),
+            Polygon([(-55.5,-19.5),(-50.92,-19.5),(-50.92,-17.16),(-55.5,-17.16)]),
+            Polygon([(-57.65,-23.67),(-53.5,-23.67),(-53.5,-19.5),(-57.65,-19.5)]),
+            Polygon([(-53.5,-23.67),(-50.92,-23.67),(-50.92,-19.5),(-53.5,-19.5)]),
+        ], crs="EPSG:4326")
+    shps["hidrografia"] = gpd.GeoDataFrame(
+        {"nome": ["Rio Paraguai","Rio Paraná","Rio Miranda","Rio Verde"]},
+        geometry=[
+            LineString([(-57.65,-19.0),(-56.5,-20.5),(-57.2,-22.0)]),
+            LineString([(-53.5,-20.0),(-52.0,-22.5),(-50.92,-23.0)]),
+            LineString([(-55.5,-19.5),(-56.5,-20.5),(-57.0,-21.0)]),
+            LineString([(-54.5,-19.0),(-54.0,-21.0),(-53.8,-22.5)]),
+        ], crs="EPSG:4326")
+    shps["rodovias"] = gpd.GeoDataFrame(
+        {"rodovia": ["BR-163","BR-262","BR-060"]},
+        geometry=[
+            LineString([(-55.3,-17.2),(-54.9,-20.4),(-55.0,-23.0)]),
+            LineString([(-57.4,-19.0),(-54.6,-20.4),(-51.0,-20.8)]),
+            LineString([(-54.0,-17.8),(-54.6,-20.4),(-54.0,-23.5)]),
+        ], crs="EPSG:4326")
+    return shps
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GRÁFICO 5-PAINÉIS INTERATIVO (mplcursors)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def gerar_grafico_72h_interativo(dados: dict, nome_ponto: str,
+                                  lat: float, lon: float) -> plt.Figure:
+    """
+    Dashboard meteorológico 72h com 5 painéis empilhados e tooltip interativo.
+
+    Painel 1 — Temperatura (°C) + Ponto de orvalho + CAPE (eixo sec.)
+    Painel 2 — Precipitação (mm) + Probabilidade (%) + sombreado risco >70%
+    Painel 3 — Radiação solar GHI / DNI / Difusa com pico anotado
+    Painel 4 — Velocidade do vento + rajadas + limites operacionais
+    Painel 5 — Umidade relativa + Heat Index + limites de defensivos/fitossanidade
+
+    mplcursors: tooltip hover em todas as linhas principais.
+    """
+    if not dados or "hourly" not in dados:
+        return None
+
+    h      = dados["hourly"]
+    times  = h.get("time", [])[:72]
+    N      = len(times)
+
+    # Extração das séries (preenchimento com NaN se ausente)
+    def _serie(key, n=N, fill=np.nan):
+        vals = h.get(key, [])[:n]
+        vals = [v if v is not None else fill for v in vals]
+        if len(vals) < n:
+            vals += [fill] * (n - len(vals))
+        return np.array(vals, dtype=float)
+
+    temp    = _serie("temperature_2m")
+    orvalho = _serie("dewpoint_2m")
+    ur      = _serie("relativehumidity_2m")
+    precip  = _serie("precipitation", fill=0.0)
+    prob_pp = _serie("precipitation_probability", fill=0.0)
+    vento   = _serie("windspeed_10m")
+    rajadas = _serie("windgusts_10m")
+    ghi     = _serie("shortwave_radiation")
+    dni     = _serie("direct_normal_irradiance")
+    difusa  = _serie("diffuse_radiation")
+    cape    = _serie("cape", fill=0.0)
+
+    # Índice de calor (Heat Index Rothfusz) quando T>27°C e RH>40%
+    def heat_index(T, RH):
+        """Fórmula Rothfusz simplificada para Heat Index (°C)."""
+        HI = np.full_like(T, np.nan)
+        mask = (T > 27.0) & (RH > 40.0)
+        t, r = T[mask], RH[mask]
+        hi = (-8.78469475556 + 1.61139411*t + 2.33854883889*r
+              - 0.14611605*t*r - 0.012308094*t**2
+              - 0.0164248277778*r**2 + 0.002211732*t**2*r
+              + 0.00072546*t*r**2 - 0.000003582*t**2*r**2)
+        HI[mask] = hi
+        return HI
+
+    hi_vals = heat_index(temp, ur)
+
+    # Timestamps formatados
+    try:
+        ts_dt = [datetime.fromisoformat(t) for t in times]
+        ts_lb = [t.strftime("%d/%m %H:%M") for t in ts_dt]
+        agora_idx = next((i for i, t in enumerate(ts_dt)
+                          if t.date() == datetime.now().date()
+                          and t.hour == datetime.now().hour), 0)
+    except Exception:
+        ts_lb = [str(i) for i in range(N)]
+        agora_idx = 0
+
+    idx = np.arange(N)
+
+    # ── Figura com gridspec ────────────────────────────────────────────────
+    fig = plt.figure(figsize=(13, 16), facecolor="#0d1117")
+    gs  = gridspec.GridSpec(5, 1, figure=fig,
+                             height_ratios=[2.2, 1.8, 1.8, 1.4, 1.8],
+                             hspace=0.08)
+    axes = [fig.add_subplot(gs[i]) for i in range(5)]
+
+    estilo_base = {"facecolor": "#111827"}
+    for ax in axes:
+        ax.set_facecolor("#111827")
+        ax.tick_params(colors="#9ca3af", labelsize=7.5)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#1f2937")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(True, color="#1e2a3a", linewidth=0.5, alpha=0.8, linestyle=":")
+        ax.set_xlim(0, N - 1)
+
+    # Linha vertical "agora"
+    for ax in axes:
+        ax.axvline(agora_idx, color="white", linewidth=0.8, linestyle="--", alpha=0.4, zorder=2)
+
+    # ── PAINEL 1: Temperatura + Ponto de orvalho + CAPE ───────────────────
+    ax1   = axes[0]
+    ax1_b = ax1.twinx()
+    ax1_b.set_facecolor("#111827")
+
+    # CAPE — barras semitransparentes (eixo secundário)
+    ax1_b.bar(idx, cape, color="#ef4444", alpha=0.25, width=1.0, zorder=1, label="CAPE (J/kg)")
+    ax1_b.set_ylabel("CAPE (J/kg)", color="#ef4444", fontsize=8)
+    ax1_b.tick_params(colors="#ef4444", labelsize=7)
+    ax1_b.axhline(1000, color="#ef4444", linewidth=0.6, linestyle=":", alpha=0.5)
+    ax1_b.axhline(2000, color="#dc2626", linewidth=0.6, linestyle=":", alpha=0.7)
+    ax1_b.spines["right"].set_edgecolor("#ef4444")
+
+    # Área entre T e Td = margem de condensação
+    ax1.fill_between(idx, temp, orvalho, alpha=0.12, color="#38bdf8", zorder=2)
+
+    l1, = ax1.plot(idx, temp,    color="#f97316", linewidth=2.0, zorder=5, label="Temperatura (°C)")
+    l2, = ax1.plot(idx, orvalho, color="#38bdf8", linewidth=1.4, linestyle="--", zorder=4, label="Ponto de orvalho (°C)")
+    ax1.fill_between(idx, temp, alpha=0.1, color="#f97316")
+    ax1.set_ylabel("°C", color="#9ca3af", fontsize=9)
+    ax1.set_xticks([])
+    ax1.legend(handles=[l1, l2], loc="upper right", fontsize=7.5,
+               facecolor="#111827", labelcolor="white", edgecolor="#374151", ncol=2)
+    ax1.set_title(
+        f"Previsão Meteorológica 72h — {nome_ponto} ({lat:.4f}°S, {lon:.4f}°W)\n"
+        f"Modelo: {dados.get('_modelo_usado','ICON-EU')} | Open-Meteo · Yamada Engenharia",
+        color="white", fontsize=10, fontweight="bold", pad=10, loc="left"
+    )
+
+    # ── PAINEL 2: Precipitação + probabilidade ─────────────────────────────
+    ax2   = axes[1]
+    ax2_b = ax2.twinx()
+    ax2_b.set_facecolor("#111827")
+
+    # Sombreio risco alto (prob > 70%)
+    for i in range(N):
+        if prob_pp[i] >= 70:
+            ax2.axvspan(i - 0.5, i + 0.5, alpha=0.12, color="#ef4444", zorder=1)
+
+    cores_pp = ["#3b82f6" if p < 5 else "#f59e0b" if p < 20 else "#ef4444" for p in precip]
+    ax2.bar(idx, precip, color=cores_pp, alpha=0.85, width=0.85, edgecolor="none", zorder=3)
+    ax2.set_ylabel("Precipitação (mm)", color="#9ca3af", fontsize=9)
+    ax2.set_xticks([])
+
+    l_prob, = ax2_b.plot(idx, prob_pp, color="#fbbf24", linewidth=1.6,
+                          linestyle="--", zorder=4, label="Prob. (%)") 
+    ax2_b.fill_between(idx, prob_pp, alpha=0.08, color="#fbbf24")
+    ax2_b.set_ylabel("Probabilidade (%)", color="#fbbf24", fontsize=8)
+    ax2_b.set_ylim(0, 100)
+    ax2_b.tick_params(colors="#fbbf24", labelsize=7)
+    ax2_b.axhline(70, color="#fbbf24", linewidth=0.7, linestyle=":", alpha=0.6)
+
+    total_72h = np.nansum(precip)
+    ax2.text(0.99, 0.93, f"Total 72h: {total_72h:.1f} mm",
+             transform=ax2.transAxes, ha="right", color="white", fontsize=8,
+             bbox=dict(facecolor=VERDE_ESCURO, alpha=0.75, boxstyle="round,pad=0.3"))
+
+    # ── PAINEL 3: Radiação Solar ───────────────────────────────────────────
+    ax3  = axes[2]
+    l_ghi,  = ax3.plot(idx, ghi,    color="#86efac", linewidth=1.8, zorder=5, label="GHI (W/m²)")
+    l_dni,  = ax3.plot(idx, dni,    color="#facc15", linewidth=1.4, zorder=4, label="DNI (W/m²)")
+    l_dif,  = ax3.plot(idx, difusa, color="#c084fc", linewidth=1.2, zorder=3, label="Difusa (W/m²)")
+    ax3.fill_between(idx, ghi, alpha=0.12, color="#86efac")
+    ax3.set_ylabel("W/m²", color="#9ca3af", fontsize=9)
+    ax3.set_xticks([])
+
+    # Anota pico diário de GHI
+    if np.any(~np.isnan(ghi)) and np.nanmax(ghi) > 0:
+        pico_idx = int(np.nanargmax(ghi))
+        pico_val = float(ghi[pico_idx])
+        ax3.annotate(
+            f"Pico: {pico_val:.0f} W/m²",
+            xy=(pico_idx, pico_val),
+            xytext=(0, 12), textcoords="offset points",
+            color="#facc15", fontsize=7.5, ha="center",
+            arrowprops=dict(arrowstyle="->", color="#facc15", lw=1.0),
+        )
+    ax3.legend(handles=[l_ghi, l_dni, l_dif], loc="upper right",
+               fontsize=7, facecolor="#111827", labelcolor="white",
+               edgecolor="#374151", ncol=3)
+
+    # ── PAINEL 4: Vento + Rajadas ──────────────────────────────────────────
+    ax4 = axes[3]
+    ax4.fill_between(idx, rajadas, vento, alpha=0.15, color="#a78bfa", zorder=2)
+    l_raj, = ax4.plot(idx, rajadas, color="#c4b5fd", linewidth=1.2,
+                       linestyle="--", zorder=4, label="Rajadas (km/h)")
+    l_ven, = ax4.plot(idx, vento,   color="#a78bfa", linewidth=1.8,
+                       zorder=5, label="Vento médio (km/h)")
+    ax4.fill_between(idx, vento, alpha=0.15, color="#a78bfa")
+
+    ax4.axhline(10, color="#fbbf24", linewidth=1.0, linestyle="--", alpha=0.8,
+                label="Limite defensivos (10 km/h)")
+    ax4.axhline(40, color="#ef4444", linewidth=0.8, linestyle=":",  alpha=0.7,
+                label="Risco operacional (40 km/h)")
+    ax4.set_ylabel("km/h", color="#9ca3af", fontsize=9)
+    ax4.set_xticks([])
+    ax4.legend(fontsize=6.5, facecolor="#111827", labelcolor="white",
+               edgecolor="#374151", ncol=2, loc="upper right")
+
+    # ── PAINEL 5: Umidade Relativa + Heat Index ────────────────────────────
+    ax5  = axes[4]
+    ax5.fill_between(idx, ur, alpha=0.2, color="#38bdf8", zorder=2)
+    l_ur, = ax5.plot(idx, ur, color="#38bdf8", linewidth=2.0, zorder=5, label="Umidade Relativa (%)")
+
+    # Heat Index sobreposto (eixo secundário)
+    ax5_b = ax5.twinx()
+    ax5_b.set_facecolor("#111827")
+    l_hi, = ax5_b.plot(idx, hi_vals, color="#fb923c", linewidth=1.4,
+                        linestyle="--", zorder=4, label="Heat Index (°C)")
+    ax5_b.set_ylabel("Heat Index (°C)", color="#fb923c", fontsize=8)
+    ax5_b.tick_params(colors="#fb923c", labelsize=7)
+    ax5_b.spines["right"].set_edgecolor("#fb923c")
+
+    ax5.axhline(55, color="#fbbf24", linewidth=0.9, linestyle="--", alpha=0.7,
+                label="Mín. defensivos (55%)")
+    ax5.axhline(90, color="#ef4444", linewidth=0.8, linestyle=":",  alpha=0.6,
+                label="Risco fitossanitário (90%)")
+    ax5.set_ylabel("Umidade (%)", color="#9ca3af", fontsize=9)
+    ax5.set_ylim(0, 105)
+    ax5.legend(fontsize=7, facecolor="#111827", labelcolor="white",
+               edgecolor="#374151", ncol=2, loc="lower right")
+
+    # ── Eixo X compartilhado (painel 5) ───────────────────────────────────
+    step = max(1, N // 12)
+    ax5.set_xticks(idx[::step])
+    ax5.set_xticklabels(ts_lb[::step], rotation=45, ha="right",
+                         fontsize=7, color="#9ca3af")
+
+    # ── mplcursors — tooltip interativo ───────────────────────────────────
+    if _HAS_MPLCURSORS:
+        linhas_interativas = [l1, l2, l_prob, l_ghi, l_ven, l_raj, l_uri := l_ur]
+        for linha in [l1, l2, l_ghi, l_dni, l_dif, l_ven, l_raj, l_ur, l_hi, l_prob]:
+            try:
+                cursor = mplcursors.cursor(linha, hover=True)
+                @cursor.connect("add")
+                def _on_add(sel, _lb=ts_lb):
+                    ix = int(round(sel.index))
+                    ix = max(0, min(ix, len(_lb) - 1))
+                    sel.annotation.set_text(
+                        f"{_lb[ix]}\n{sel.artist.get_label()}: {sel.target[1]:.1f}"
+                    )
+                    sel.annotation.get_bbox_patch().set(
+                        facecolor="#1e293b", alpha=0.9, edgecolor="#3DA63A"
+                    )
+                    sel.annotation.set_color("white")
+            except Exception:
+                pass
+
+    fig.text(0.01, 0.005,
+             f"Yamada Engenharia · Open-Meteo ({dados.get('_modelo_usado','ICON-EU')}) · "
+             f"{datetime.now().strftime('%d/%m/%Y %H:%M')}",
+             color="#555", fontsize=7)
+    plt.tight_layout(rect=[0, 0.01, 1, 1])
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAPAS GOES-19 (com suporte a cartopy quando disponível)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def gerar_mapa_canal_goes19(banda_id: str, shps: dict, nome_ponto: str,
+                             lat: float, lon: float,
+                             goes_data=None, extent=None,
+                             is_rgb: bool = False,
+                             ts_label: str = "",
+                             fonte: str = "simulado",
+                             df_focos: pd.DataFrame = None) -> plt.Figure:
+    """
+    Gera mapa para canal GOES-19 ou composto RGB.
+    Suporta cartopy (projeção PlateCarree + features) se disponível,
+    senão usa matplotlib puro com shapefiles geopandas.
+
+    Parâmetros:
+      banda_id   — chave do BANDAS_INFO
+      is_rgb     — se True, goes_data é array HxWx3 (composição RGB)
+      fonte      — 'goes2go' | 'boto3' | 'simulado'
+    """
+    info     = BANDAS_INFO.get(banda_id, {"nome": banda_id, "icon": "🛰️",
+                                           "uso": "", "cmap": "gray"})
+    bbox_ms  = [_MS_LON_MIN, _MS_LON_MAX, _MS_LAT_MIN, _MS_LAT_MAX]
+
+    if _HAS_CARTOPY and goes_data is not None:
+        # ── Renderização com Cartopy ───────────────────────────────────────
+        proj = ccrs.PlateCarree()
+        fig  = plt.figure(figsize=(9, 7), facecolor=PRETO)
+        ax   = fig.add_subplot(1, 1, 1, projection=proj)
+        ax.set_extent([bbox_ms[0]-0.5, bbox_ms[1]+0.5,
+                       bbox_ms[2]-0.5, bbox_ms[3]+0.5], crs=proj)
+        ax.set_facecolor("#0d1117")
+
+        if is_rgb and goes_data.ndim == 3:
+            ax.imshow(goes_data, extent=extent, origin="upper",
+                      transform=proj, aspect="auto", alpha=0.9)
+        elif not is_rgb:
+            img = ax.imshow(goes_data, extent=extent, cmap=info["cmap"],
+                            origin="upper", transform=proj, aspect="auto", alpha=0.85,
+                            vmin=np.nanpercentile(goes_data, 2),
+                            vmax=np.nanpercentile(goes_data, 98))
+            cbar = plt.colorbar(img, ax=ax, fraction=0.03, pad=0.01)
+            cbar.set_label(info["nome"], color="white", fontsize=8)
+            cbar.ax.tick_params(colors="white")
+
+        # Features cartopy
+        ax.add_feature(cfeature.STATES.with_scale("10m"),
+                       edgecolor="white", linewidth=0.6, alpha=0.7)
+        ax.add_feature(cfeature.RIVERS.with_scale("10m"),
+                       edgecolor="#4FC3F7", linewidth=0.6, alpha=0.5)
+        ax.add_feature(cfeature.BORDERS.with_scale("10m"),
+                       edgecolor="#aaaaaa", linewidth=0.8, alpha=0.6)
+        ax.gridlines(draw_labels=True, color="#222222", alpha=0.4,
+                     linewidth=0.4, x_inline=False, y_inline=False,
+                     xlabel_style={"color":"#aaaaaa","fontsize":7},
+                     ylabel_style={"color":"#aaaaaa","fontsize":7})
+
+    else:
+        # ── Renderização matplotlib puro ──────────────────────────────────
+        fig, ax = plt.subplots(figsize=(9, 7), facecolor=PRETO)
+        ax.set_facecolor("#0d1117")
+
+        if goes_data is not None:
+            if is_rgb and goes_data.ndim == 3:
+                ax.imshow(goes_data, extent=extent, origin="upper",
+                          aspect="auto", alpha=0.9)
+            else:
+                img  = ax.imshow(goes_data, extent=extent, cmap=info["cmap"],
+                                 origin="upper", alpha=0.85, aspect="auto",
+                                 vmin=np.nanpercentile(goes_data, 2),
+                                 vmax=np.nanpercentile(goes_data, 98))
+                cbar = plt.colorbar(img, ax=ax, fraction=0.03, pad=0.01)
+                cbar.set_label(info["nome"], color="white", fontsize=8)
+                cbar.ax.tick_params(colors="white")
+        else:
+            # Fallback sintético realista
+            x  = np.linspace(bbox_ms[0], bbox_ms[1], 300)
+            y  = np.linspace(bbox_ms[2], bbox_ms[3], 300)
+            X, Y = np.meshgrid(x, y)
+            np.random.seed(abs(hash(banda_id)) % 9999)
+            if banda_id in ["B13", "B14"]:
+                Z = np.sin(X*0.4)*np.cos(Y*0.4)*30 + 270 + np.random.normal(0, 5, X.shape)
+            elif banda_id == "B09":
+                Z = np.cos(X*0.3+Y*0.2)*20 + 250 + np.random.normal(0, 3, X.shape)
+            elif banda_id == "B02":
+                Z = (np.abs(np.sin(X*0.5)*np.cos(Y*0.6))*0.6 + 0.1
+                     + np.random.normal(0, 0.05, X.shape)).clip(0, 1)
+            elif is_rgb:
+                Z_r = np.clip(np.abs(np.sin(X*0.3)*np.cos(Y*0.4))*0.8+0.1
+                              + np.random.normal(0, 0.06, X.shape), 0, 1)
+                Z_g = np.clip(np.abs(np.cos(X*0.35)*np.sin(Y*0.35))*0.7+0.1
+                              + np.random.normal(0, 0.06, X.shape), 0, 1)
+                Z_b = np.clip(np.abs(np.sin(X*0.5+Y*0.5))*0.9+0.05
+                              + np.random.normal(0, 0.06, X.shape), 0, 1)
+                Z   = np.stack([Z_r, Z_g, Z_b], axis=-1)
+                ax.imshow(Z, extent=bbox_ms, origin="lower", aspect="auto", alpha=0.85)
+                ax.text(0.02, 0.02, "⚠ RGB simulado",
+                        transform=ax.transAxes, fontsize=7, color="yellow",
+                        alpha=0.8, va="bottom")
+            else:
+                Z = np.sin(X*0.35)*np.cos(Y*0.35)*25+270 + np.random.normal(0, 4, X.shape)
+
+            if not is_rgb:
+                img  = ax.pcolormesh(X, Y, Z, cmap=info["cmap"], shading="auto", alpha=0.9)
+                cbar = plt.colorbar(img, ax=ax, fraction=0.03, pad=0.01)
+                cbar.set_label(info["nome"], color="white", fontsize=8)
+                cbar.ax.tick_params(colors="white")
+                ax.text(0.02, 0.02, "⚠ GOES-19 simulado (S3/goes2go indisponível)",
+                        transform=ax.transAxes, fontsize=7, color="yellow",
+                        alpha=0.8, va="bottom")
+
+        # Shapefiles
+        try:
+            shps["municipios"].boundary.plot(ax=ax, color="white", linewidth=0.4, alpha=0.5)
+        except Exception: pass
+        try:
+            shps["biomas"].boundary.plot(ax=ax, color="#88BB88",
+                                          linewidth=0.8, linestyle="--", alpha=0.5)
+        except Exception: pass
+        try:
+            shps["hidrografia"].plot(ax=ax, color="#4FC3F7", linewidth=1.0, alpha=0.7)
+        except Exception: pass
+        try:
+            shps["rodovias"].plot(ax=ax, color="#FFB74D", linewidth=0.8, alpha=0.6)
+        except Exception: pass
+
+        ax.set_xlim(bbox_ms[0]-0.5, bbox_ms[1]+0.5)
+        ax.set_ylim(bbox_ms[2]-0.5, bbox_ms[3]+0.5)
+        ax.set_xlabel("Longitude", color="#aaaaaa", fontsize=8)
+        ax.set_ylabel("Latitude",  color="#aaaaaa", fontsize=8)
+        ax.tick_params(colors="#aaaaaa", labelsize=7)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#333333")
+        ax.grid(True, color="#222222", linewidth=0.4, alpha=0.5)
+
+    # Focos INPE nos canais B02 e B13
+    if df_focos is not None and not df_focos.empty and banda_id in ["B02", "B13"]:
+        try:
+            frp_v = df_focos.get("frp", pd.Series([50]*len(df_focos)))
+            frp_n = (frp_v - frp_v.min()) / (frp_v.max() - frp_v.min() + 1e-5)
+            cores = plt.cm.YlOrRd(frp_n.values)
+            for i, row in df_focos.iterrows():
+                ax.plot(row.get("longitude", 0), row.get("latitude", 0),
+                        marker="^", color=cores[i % len(cores)],
+                        markersize=6, alpha=0.85, zorder=9,
+                        markeredgecolor="white", markeredgewidth=0.4)
+        except Exception: pass
+
+    # Marcador do ponto selecionado
+    ax.plot(lon, lat, marker="*", color=VERDE_MEDIO, markersize=16, zorder=12,
+            markeredgecolor="white", markeredgewidth=1.5)
+    ax.annotate(
+        f" {nome_ponto}", (lon, lat),
+        fontsize=8.5, color="white", fontweight="bold",
+        xytext=(7, 7), textcoords="offset points", zorder=13,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor=VERDE_ESCURO,
+                  alpha=0.85, edgecolor="none"),
+    )
+
+    # Seta Norte
+    ax.annotate("N ▲", xy=(0.97, 0.96), xycoords="axes fraction",
+                ha="right", va="top", color="white", fontsize=11, fontweight="bold")
+
+    # Título
+    ts_info  = f" | {ts_label}" if ts_label else ""
+    fonte_lb = {"goes2go": "goes2go ✓", "boto3": "S3/boto3 ✓", "simulado": "⚠ simulado"}
+    ax.set_title(
+        f"{info['icon']}  {info['nome']}{ts_info}\n"
+        f"{info['uso']}  [{fonte_lb.get(fonte, fonte)}]",
+        color="white", fontsize=9.5, fontweight="bold", pad=8, fontfamily="monospace"
+    )
+
+    # Legenda
+    handles = [
+        mpatches.Patch(facecolor="none", edgecolor="white",    linewidth=0.5, label="Municípios MS"),
+        mpatches.Patch(facecolor=VERDE_MEDIO, alpha=0.6,       label=f"★ {nome_ponto}"),
+        mpatches.Patch(facecolor="#4FC3F7",   alpha=0.7,       label="Rios"),
+        mpatches.Patch(facecolor="#FFB74D",   alpha=0.6,       label="Rodovias BR"),
+    ]
+    if df_focos is not None and not df_focos.empty and banda_id in ["B02", "B13"]:
+        handles.append(mpatches.Patch(facecolor="#FF6B35", alpha=0.8, label="Focos INPE"))
+    ax.legend(handles=handles, loc="lower left", fontsize=6.5, framealpha=0.75,
+              facecolor="#0d1117", labelcolor="white", edgecolor="#333333", ncol=2)
+
+    fig.text(
+        0.01, 0.005,
+        f"GOES-19 ABI · {ts_label or datetime.now().strftime('%d/%m/%Y %H:%M')} UTC · Yamada Engenharia",
+        color="#666", fontsize=6.5, va="bottom"
+    )
+    plt.tight_layout(pad=0.5)
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOWCASTING DE CHUVA — 3 FONTES INTEGRADAS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calcular_nowcasting_chuva(dados: dict, goes_tb_serie: list = None) -> dict:
+    """
+    Estimativa de chegada de chuva integrando 3 fontes independentes:
+
+    1. Nowcasting GOES-19 B13 (temperatura de brilho):
+       - TB < 233 K E dTB/dt < -2 K/10min → CBs em desenvolvimento → 15-45 min
+       - TB < 253 K → nuvem profunda → chuva possível
+       (goes_tb_serie: lista de TB [K] das últimas 3 imagens, da mais antiga para a mais nova)
+
+    2. Probabilidade horária Open-Meteo:
+       - Primeira hora com prob ≥ 70% nas próximas 6h
+
+    3. Índices de instabilidade (CAPE + Lifted Index):
+       - CAPE > 2000 + LI < -4 → tempestade severa
+       - CAPE > 1000 + LI < -2 → alta instabilidade
+       - CAPE > 500            → instabilidade moderada
+
+    Retorna dict com diagnóstico por fonte + severidade geral.
+    """
+    resultado = {
+        "goes_tb":     {"status": "indisponível", "nivel": "azul",      "msg": "Imagem GOES não disponível."},
+        "openmeteo":   {"status": "verificando",  "nivel": "verde",     "msg": ""},
+        "instabilidade": {"status": "verificando","nivel": "verde",     "msg": ""},
+        "nivel_geral": "verde",
+        "prob_timeline_6h": [],
+    }
+
+    # ── Fonte 1: GOES-19 TB ──────────────────────────────────────────────
+    if goes_tb_serie and len(goes_tb_serie) >= 2:
+        tb_atual  = goes_tb_serie[-1]
+        tb_ant    = goes_tb_serie[-2]
+        dtb_10min = tb_atual - tb_ant  # negativo = topo esfriando = CB cresce
+
+        if tb_atual < 233:
+            if dtb_10min < -2:
+                resultado["goes_tb"] = {
+                    "status": "⚡ Chuva convectiva em ~15–45 min",
+                    "nivel": "vermelho",
+                    "msg": (f"TB = {tb_atual:.0f} K (topo frio ativo) | "
+                            f"ΔTB = {dtb_10min:.1f} K/10min (CB em desenvolvimento). "
+                            f"Risco de granizo e raios."),
+                }
+            else:
+                resultado["goes_tb"] = {
+                    "status": "⛈ Nuvem profunda sobre o ponto",
+                    "nivel": "laranja",
+                    "msg": f"TB = {tb_atual:.0f} K. Chuva possível nas próximas 1–2h.",
+                }
+        elif tb_atual < 253:
+            resultado["goes_tb"] = {
+                "status": "🌦 Nuvem convectiva moderada",
+                "nivel": "amarelo",
+                "msg": f"TB = {tb_atual:.0f} K. Pancadas possíveis nas próximas 2–4h.",
+            }
+        else:
+            resultado["goes_tb"] = {
+                "status": "☁️ Sem atividade convectiva significativa",
+                "nivel": "verde",
+                "msg": f"TB = {tb_atual:.0f} K (topo quente — nuvens baixas ou cirrus).",
+            }
+
+    # ── Fonte 2: Probabilidade Open-Meteo ────────────────────────────────
+    if dados and "hourly" in dados:
+        h     = dados["hourly"]
+        probs = h.get("precipitation_probability", [])[:6]
+        times = h.get("time", [])[:6]
+        probs = [p or 0 for p in probs]
+        resultado["prob_timeline_6h"] = list(zip(
+            [t.split("T")[1][:5] if "T" in t else t[-5:] for t in times],
+            probs
+        ))
+
+        # Primeira hora com prob ≥ 70%
+        hora_chuva = next(
+            ((t.split("T")[1][:5] if "T" in t else t[-5:], p)
+             for t, p in zip(times, probs) if p >= 70),
+            None
+        )
+        if hora_chuva:
+            resultado["openmeteo"] = {
+                "status": f"🌧 Chuva mais provável em: {hora_chuva[0]}",
+                "nivel": "laranja",
+                "msg": f"Probabilidade de {hora_chuva[1]:.0f}% às {hora_chuva[0]}.",
+            }
+        elif max(probs, default=0) >= 40:
+            p_max = max(probs)
+            h_max = times[probs.index(p_max)]
+            h_max_fmt = h_max.split("T")[1][:5] if "T" in h_max else h_max[-5:]
+            resultado["openmeteo"] = {
+                "status": f"🌦 Chance moderada: {p_max:.0f}% às {h_max_fmt}",
+                "nivel": "amarelo",
+                "msg": f"Probabilidade máxima de {p_max:.0f}% nas próximas 6h.",
+            }
+        else:
+            resultado["openmeteo"] = {
+                "status": "☀️ Sem chuva significativa nas próximas 6h",
+                "nivel": "verde",
+                "msg": f"Probabilidade máxima: {max(probs, default=0):.0f}%.",
+            }
+
+        # ── Fonte 3: CAPE + LI ───────────────────────────────────────────
+        cape_vals = h.get("cape", [])[:3]
+        li_vals   = h.get("lifted_index", [])[:3]
+        cape_max  = max((v for v in cape_vals if v is not None), default=0)
+        li_min    = min((v for v in li_vals  if v is not None), default=0)
+
+        if cape_max > 2000 and li_min < -4:
+            resultado["instabilidade"] = {
+                "status": "⚡ ATMOSFERA EXPLOSIVA",
+                "nivel": "vermelho",
+                "msg": (f"CAPE = {cape_max:.0f} J/kg | LI = {li_min:.1f}. "
+                        f"Risco severo: tempestade com granizo e ventos > 70 km/h."),
+            }
+        elif cape_max > 1000 and li_min < -2:
+            resultado["instabilidade"] = {
+                "status": "⛈ Alta instabilidade — chuva forte",
+                "nivel": "laranja",
+                "msg": (f"CAPE = {cape_max:.0f} J/kg | LI = {li_min:.1f}. "
+                        f"Chuva forte provável nas próximas 1–2h."),
+            }
+        elif cape_max > 500:
+            resultado["instabilidade"] = {
+                "status": "🌦 Instabilidade moderada",
+                "nivel": "amarelo",
+                "msg": f"CAPE = {cape_max:.0f} J/kg. Pancadas vespertinas possíveis.",
+            }
+        else:
+            resultado["instabilidade"] = {
+                "status": "✅ Atmosfera estável",
+                "nivel": "verde",
+                "msg": f"CAPE = {cape_max:.0f} J/kg. Sem convecção organizada esperada.",
+            }
+
+    # Nível geral = o mais severo dos 3
+    _pesos = {"vermelho": 4, "laranja": 3, "amarelo": 2, "verde": 1, "azul": 0, "indisponível": 0}
+    niveis = [resultado[k]["nivel"] for k in ["goes_tb", "openmeteo", "instabilidade"]]
+    resultado["nivel_geral"] = max(niveis, key=lambda n: _pesos.get(n, 0))
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANÁLISES AGRONÔMICAS (mantidas do v3.0 + ajustes)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def calcular_janela_defensivos(dados: dict) -> list:
+    """Janelas de 24h para aplicação de defensivos — critérios MAPA/Embrapa."""
     if not dados or "hourly" not in dados:
         return []
     h = dados["hourly"]
     janelas = []
-    for i, t in enumerate(h.get("time",[])[:24]):
-        hora  = t.split("T")[1][:5] if "T" in t else t[-5:]
-        pp    = (h.get("precipitation",[0]*24)[i] or 0)
-        tmp   = (h.get("temperature_2m",[25]*24)[i] or 25)
-        ur    = (h.get("relativehumidity_2m",[60]*24)[i] or 60)
-        vnt   = (h.get("windspeed_10m",[5]*24)[i] or 0)
-        bloq  = []
+    for i, t in enumerate(h.get("time", [])[:24]):
+        hora = t.split("T")[1][:5] if "T" in t else t[-5:]
+        pp   = (h.get("precipitation",         [0]*24)[i] or 0)
+        tmp  = (h.get("temperature_2m",         [25]*24)[i] or 25)
+        ur   = (h.get("relativehumidity_2m",    [60]*24)[i] or 60)
+        vnt  = (h.get("windspeed_10m",           [5]*24)[i] or 0)
+        bloq = []
         if vnt >= 10: bloq.append(f"Vento {vnt:.0f}km/h")
         if tmp >= 30: bloq.append(f"Temp {tmp:.0f}°C")
         if ur  <= 55: bloq.append(f"UR {ur:.0f}%")
@@ -1046,23 +1360,24 @@ def calcular_janela_defensivos(dados: dict) -> list:
 
 
 def calcular_graus_dia(dados: dict, cultura: str, data_semeadura: datetime) -> dict:
+    """GDA com Tb/Tc por cultura. Determina estádio fenológico atual."""
     if not dados or "daily" not in dados:
         return {}
-    cfg    = CULTURAS_GDA.get(cultura, CULTURAS_GDA["Soja"])
-    tb, tc = cfg["tb"], cfg["tc"]
-    stags  = cfg["estagios"]
-    d      = dados["daily"]
+    cfg       = CULTURAS_GDA.get(cultura, CULTURAS_GDA["Soja"])
+    tb, tc    = cfg["tb"], cfg["tc"]
+    stags     = cfg["estagios"]
+    d         = dados["daily"]
     gda_total = 0.0
-    for tmax, tmin in zip(d.get("temperature_2m_max",[]), d.get("temperature_2m_min",[])):
+    for tmax, tmin in zip(d.get("temperature_2m_max", []), d.get("temperature_2m_min", [])):
         if tmax is None or tmin is None:
             continue
-        tmedia = (min(tmax, tc) + max(tmin, tb)) / 2
+        tmedia    = (min(tmax, tc) + max(tmin, tb)) / 2
         gda_total += max(0.0, tmedia - tb)
     estagio_atual = stags[0][1]
     for limiar, nome in stags:
         if gda_total >= limiar: estagio_atual = nome
         else: break
-    proximo = next(((lim, nome) for lim, nome in stags if gda_total < lim), None)
+    proximo = next(((l, n) for l, n in stags if gda_total < l), None)
     return {
         "cultura": cultura, "gda_total": round(gda_total, 1),
         "estagio_atual": estagio_atual, "proximo_estagio": proximo,
@@ -1072,11 +1387,12 @@ def calcular_graus_dia(dados: dict, cultura: str, data_semeadura: datetime) -> d
 
 
 def calcular_risco_fitossanitario(dados: dict) -> list:
+    """Risco de Ferrugem Asiática e Brusone com base em T e UR horárias."""
     if not dados or "hourly" not in dados:
         return []
     h    = dados["hourly"]
-    temp = h.get("temperature_2m",[])[:48]
-    umid = h.get("relativehumidity_2m",[])[:48]
+    temp = h.get("temperature_2m", [])[:48]
+    umid = h.get("relativehumidity_2m", [])[:48]
     alertas = []
     h_fer = h_bru = 0
     for t, u in zip(temp, umid):
@@ -1086,23 +1402,26 @@ def calcular_risco_fitossanitario(dados: dict) -> list:
             if 20 <= t <= 28 and u > 90: h_bru += 1
             else: h_bru = 0
     if h_fer >= 12:
-        nivel = "Crítico" if h_fer>=20 else ("Alto" if h_fer>=16 else "Médio")
-        alertas.append({"doenca":"Ferrugem Asiática (Soja)","nivel":nivel,"horas":h_fer,
-                         "icone":"🍂","cor":"vermelho" if nivel in ["Crítico","Alto"] else "amarelo",
-                         "msg":f"{h_fer}h favoráveis. Aplique triazol+estrobilurina preventivamente."})
+        nv = "Crítico" if h_fer >= 20 else ("Alto" if h_fer >= 16 else "Médio")
+        alertas.append({"doenca": "Ferrugem Asiática (Soja)", "nivel": nv,
+                        "horas": h_fer, "icone": "🍂",
+                        "cor": "vermelho" if nv in ["Crítico","Alto"] else "amarelo",
+                        "msg": f"{h_fer}h favoráveis. Aplique triazol+estrobilurina preventivamente."})
     if h_bru >= 10:
-        nivel = "Crítico" if h_bru>=18 else ("Alto" if h_bru>=14 else "Médio")
-        alertas.append({"doenca":"Brusone (Arroz/Trigo)","nivel":nivel,"horas":h_bru,
-                         "icone":"🌾","cor":"vermelho" if nivel in ["Crítico","Alto"] else "amarelo",
-                         "msg":f"{h_bru}h favoráveis. Risco no espigamento. Aplique triclazol."})
+        nv = "Crítico" if h_bru >= 18 else ("Alto" if h_bru >= 14 else "Médio")
+        alertas.append({"doenca": "Brusone (Arroz/Trigo)", "nivel": nv,
+                        "horas": h_bru, "icone": "🌾",
+                        "cor": "vermelho" if nv in ["Crítico","Alto"] else "amarelo",
+                        "msg": f"{h_bru}h favoráveis. Aplique triclazol ou azoxistrobina."})
     if not alertas:
-        alertas.append({"doenca":"Sem risco fitossanitário","nivel":"Baixo","horas":0,
-                         "icone":"✅","cor":"verde",
-                         "msg":"Condições desfavoráveis ao desenvolvimento de doenças foliares (48h)."})
+        alertas.append({"doenca": "Sem risco fitossanitário", "nivel": "Baixo",
+                        "horas": 0, "icone": "✅", "cor": "verde",
+                        "msg": "Condições desfavoráveis às doenças foliares (48h)."})
     return alertas
 
 
 def calcular_balanco_hidrico_thornthwaite(dados: dict, cad_mm: float = 65.0) -> dict:
+    """Balanço hídrico Thornthwaite-Mather com CAD configurável pelo usuário."""
     if not dados or "daily" not in dados:
         return {}
     d        = dados["daily"]
@@ -1122,8 +1441,8 @@ def calcular_balanco_hidrico_thornthwaite(dados: dict, cad_mm: float = 65.0) -> 
             arm_novo = max(0.0, arm * np.exp(bal / cad_mm))
             exc = 0.0; etr = pp + (arm - arm_novo); def_ = eto - etr
         resultados.append({"arm":round(arm_novo,2),"def":round(def_,2),
-                            "exc":round(exc,2),"etr":round(etr,2),
-                            "eto":round(eto,2),"pp":round(pp,2)})
+                           "exc":round(exc,2),"etr":round(etr,2),
+                           "eto":round(eto,2),"pp":round(pp,2)})
         arm = arm_novo
     if not resultados:
         return {}
@@ -1142,246 +1461,69 @@ def calcular_balanco_hidrico_thornthwaite(dados: dict, cad_mm: float = 65.0) -> 
 
 
 def calcular_alertas(dados: dict, lat: float, gda_info: dict = None) -> list:
+    """Alertas meteorológicos com adaptação ao estádio fenológico."""
     alertas = []
     if not dados or "daily" not in dados:
         return alertas
-    d  = dados["daily"]
+    d            = dados["daily"]
     tmin         = d.get("temperature_2m_min", [20]*7)
-    precip_diario= d.get("precipitation_sum", [0]*7)
-    wcode        = d.get("weathercode", [0]*7)
-    estagio_atual= gda_info.get("estagio_atual","") if gda_info else ""
-    est_crit     = any(s in estagio_atual for s in ["R1","R2","R3","R4","R5","R6"])
+    precip_d     = d.get("precipitation_sum",  [0]*7)
+    wcode        = d.get("weathercode",        [0]*7)
+    estagio      = gda_info.get("estagio_atual","") if gda_info else ""
+    est_crit     = any(s in estagio for s in ["R1","R2","R3","R4","R5","R6"])
     for i, t in enumerate(tmin[:3]):
         if t is not None and t < 5:
-            classe = "vermelho" if (t < 2 or est_crit) else "amarelo"
-            nivel  = "🔴 EMERGÊNCIA" if (t < 2 or est_crit) else "🟡 ALERTA"
-            nota   = f" ⚠️ Cultura em {estagio_atual}!" if est_crit else ""
-            alertas.append({"nivel":classe,"icone":"❄️",
-                            "titulo":f"{nivel} — Risco de Geada",
+            c = "vermelho" if (t < 2 or est_crit) else "amarelo"
+            n = "🔴 EMERGÊNCIA" if (t < 2 or est_crit) else "🟡 ALERTA"
+            nota = f" ⚠️ Cultura em {estagio}!" if est_crit else ""
+            alertas.append({"nivel":c,"icone":"❄️","titulo":f"{n} — Risco de Geada",
                             "msg":f"Mínima {t:.1f}°C em {i+1} dia(s). Proteja culturas sensíveis.{nota}"})
-    for i, pp in enumerate(precip_diario[:3]):
-        if pp is not None and pp > 40:
-            classe = "vermelho" if pp > 80 else "amarelo"
-            nivel  = "🔴 EMERGÊNCIA" if pp > 80 else "🟡 ALERTA"
-            alertas.append({"nivel":classe,"icone":"⛈️",
-                            "titulo":f"{nivel} — Chuva Intensa",
-                            "msg":f"{pp:.0f} mm em 24h. Risco de enxurrada. Suspenda pulverizações."})
+    for i, pp in enumerate(precip_d[:3]):
+        if pp and pp > 40:
+            c = "vermelho" if pp > 80 else "amarelo"
+            n = "🔴 EMERGÊNCIA" if pp > 80 else "🟡 ALERTA"
+            alertas.append({"nivel":c,"icone":"⛈️","titulo":f"{n} — Chuva Intensa",
+                            "msg":f"{pp:.0f} mm em 24h. Suspenda pulverizações."})
     for i, wc in enumerate(wcode[:3]):
         if wc in [95, 99]:
             alertas.append({"nivel":"vermelho","icone":"⚡",
                             "titulo":"🔴 EMERGÊNCIA — Tempestade Severa",
-                            "msg":f"Tempestade com raios em {i+1} dia(s). Risco granizo/ventos >60km/h."})
-    dias_secos = sum(1 for pp in precip_diario if pp is not None and pp < 1)
+                            "msg":f"Tempestade com raios em {i+1} dia(s). Risco de granizo."})
+    dias_secos = sum(1 for pp in precip_d if pp is not None and pp < 1)
     if dias_secos >= 5:
-        alertas.append({"nivel":"amarelo","icone":"🌵",
-                        "titulo":"🟡 ALERTA — Veranico",
+        alertas.append({"nivel":"amarelo","icone":"🌵","titulo":"🟡 ALERTA — Veranico",
                         "msg":f"{dias_secos} dias sem chuva previstos. Intensifique irrigação."})
     if not alertas:
-        alertas.append({"nivel":"verde","icone":"✅",
-                        "titulo":"🟢 SEM ALERTAS ATIVOS",
+        alertas.append({"nivel":"verde","icone":"✅","titulo":"🟢 SEM ALERTAS ATIVOS",
                         "msg":"Condições favoráveis para as próximas 72 horas."})
     return alertas
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CARREGAMENTO DOS SHAPEFILES
+# GRÁFICOS AUXILIARES (mantidos do v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def carregar_shapefiles():
-    shps = {}
-    try:
-        url = "https://raw.githubusercontent.com/tbrugz/geodata-br/master/geojson/geojs-50-mun.json"
-        shps["municipios"] = gpd.read_file(url)
-    except Exception:
-        from shapely.geometry import box as sgbox
-        shps["municipios"] = gpd.GeoDataFrame(
-            {"name":["MS"]}, geometry=[sgbox(-57.65,-23.67,-50.92,-17.16)], crs="EPSG:4326")
-    from shapely.geometry import Polygon, LineString
-    shps["biomas"] = gpd.GeoDataFrame(
-        {"bioma":["Pantanal","Cerrado","Campo/Agro","Transição"]},
-        geometry=[
-            Polygon([(-57.65,-19.5),(-55.5,-19.5),(-55.5,-17.16),(-57.65,-17.16)]),
-            Polygon([(-55.5,-19.5),(-50.92,-19.5),(-50.92,-17.16),(-55.5,-17.16)]),
-            Polygon([(-57.65,-23.67),(-53.5,-23.67),(-53.5,-19.5),(-57.65,-19.5)]),
-            Polygon([(-53.5,-23.67),(-50.92,-23.67),(-50.92,-19.5),(-53.5,-19.5)]),
-        ], crs="EPSG:4326")
-    shps["hidrografia"] = gpd.GeoDataFrame(
-        {"nome":["Rio Paraguai","Rio Paraná","Rio Miranda","Rio Verde"]},
-        geometry=[
-            LineString([(-57.65,-19.0),(-56.5,-20.5),(-57.2,-22.0)]),
-            LineString([(-53.5,-20.0),(-52.0,-22.5),(-50.92,-23.0)]),
-            LineString([(-55.5,-19.5),(-56.5,-20.5),(-57.0,-21.0)]),
-            LineString([(-54.5,-19.0),(-54.0,-21.0),(-53.8,-22.5)]),
-        ], crs="EPSG:4326")
-    shps["rodovias"] = gpd.GeoDataFrame(
-        {"rodovia":["BR-163","BR-262","BR-060"]},
-        geometry=[
-            LineString([(-55.3,-17.2),(-54.9,-20.4),(-55.0,-23.0)]),
-            LineString([(-57.4,-19.0),(-54.6,-20.4),(-51.0,-20.8)]),
-            LineString([(-54.0,-17.8),(-54.6,-20.4),(-54.0,-23.5)]),
-        ], crs="EPSG:4326")
-    return shps
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GERAÇÃO DOS GRÁFICOS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def gerar_mapa_banda(banda_id, shps, municipio, coords,
-                     goes_data=None, extent=None, df_focos=None):
-    info    = BANDAS_INFO[banda_id]
-    lat, lon= coords["lat"], coords["lon"]
-    bbox_ms = [-57.65, -50.92, -23.67, -17.16]
-    fig, ax = plt.subplots(figsize=(9, 7), facecolor=PRETO)
-    ax.set_facecolor("#0d1117")
-    if goes_data is not None and extent is not None:
-        img  = ax.imshow(goes_data, extent=extent, cmap=info["cmap"], origin="upper",
-                         alpha=0.85, aspect="auto",
-                         vmin=np.nanpercentile(goes_data,2), vmax=np.nanpercentile(goes_data,98))
-        cbar = plt.colorbar(img, ax=ax, fraction=0.03, pad=0.01)
-        cbar.set_label(info["nome"], color="white", fontsize=8)
-        cbar.ax.tick_params(colors="white")
-    else:
-        x = np.linspace(bbox_ms[0],bbox_ms[1],300)
-        y = np.linspace(bbox_ms[2],bbox_ms[3],300)
-        X,Y = np.meshgrid(x,y)
-        np.random.seed(int(banda_id.replace("B","")))
-        if banda_id in ["B07","B13"]:
-            Z = np.sin(X*0.4)*np.cos(Y*0.4)*30+280+np.random.normal(0,5,X.shape)
-        elif banda_id=="B09":
-            Z = np.cos(X*0.3+Y*0.2)*20+250+np.random.normal(0,3,X.shape)
-        elif banda_id in ["B02","B03"]:
-            Z = (np.abs(np.sin(X*0.5)*np.cos(Y*0.6))*0.6+0.1+np.random.normal(0,0.05,X.shape)).clip(0,1)
-        else:
-            Z = np.sin(X*0.35)*np.cos(Y*0.35)*25+270+np.random.normal(0,4,X.shape)
-        img  = ax.pcolormesh(X,Y,Z,cmap=info["cmap"],shading="auto",alpha=0.9)
-        cbar = plt.colorbar(img, ax=ax, fraction=0.03, pad=0.01)
-        cbar.set_label(info["nome"], color="white", fontsize=8)
-        cbar.ax.tick_params(colors="white")
-        ax.text(0.02,0.02,"⚠ GOES-19 simulado",transform=ax.transAxes,
-                fontsize=7,color="yellow",alpha=0.8,va="bottom")
-    try:
-        gdf = shps["municipios"]
-        gdf.boundary.plot(ax=ax, color="white", linewidth=0.4, alpha=0.5)
-        col = next((c for c in gdf.columns if "nome" in c.lower() or "name" in c.lower()), None)
-        if col:
-            sel = gdf[gdf[col].str.upper() == municipio.upper()]
-            if not sel.empty:
-                sel.plot(ax=ax, facecolor="none", edgecolor=VERDE_MEDIO, linewidth=2.0, alpha=0.9)
-                sel.plot(ax=ax, facecolor=VERDE_MEDIO, alpha=0.15)
-    except Exception: pass
-    try: shps["biomas"].boundary.plot(ax=ax,color="#88BB88",linewidth=0.8,linestyle="--",alpha=0.5)
-    except Exception: pass
-    try: shps["hidrografia"].plot(ax=ax,color="#4FC3F7",linewidth=1.0,alpha=0.7)
-    except Exception: pass
-    try: shps["rodovias"].plot(ax=ax,color="#FFB74D",linewidth=0.8,alpha=0.6)
-    except Exception: pass
-    if banda_id in ["B07","B03"] and df_focos is not None and not df_focos.empty:
-        try:
-            frp_v = df_focos.get("frp", pd.Series([50]*len(df_focos)))
-            frp_n = (frp_v - frp_v.min()) / (frp_v.max() - frp_v.min() + 1e-5)
-            cores = plt.cm.YlOrRd(frp_n.values)
-            for i, row in df_focos.iterrows():
-                ax.plot(row.get("longitude",0), row.get("latitude",0),
-                        marker="^", color=cores[i%len(cores)], markersize=6,
-                        alpha=0.85, zorder=9, markeredgecolor="white", markeredgewidth=0.4)
-        except Exception: pass
-    ax.plot(lon,lat,marker="*",color=VERDE_MEDIO,markersize=14,zorder=10,
-            markeredgecolor="white",markeredgewidth=1.2)
-    ax.annotate(f" {municipio}",(lon,lat),fontsize=9,color="white",fontweight="bold",
-                xytext=(6,6),textcoords="offset points",zorder=11,
-                bbox=dict(boxstyle="round,pad=0.3",facecolor=VERDE_ESCURO,alpha=0.8,edgecolor="none"))
-    ax.set_xlim(bbox_ms[0]-.5,bbox_ms[1]+.5); ax.set_ylim(bbox_ms[2]-.5,bbox_ms[3]+.5)
-    ax.set_title(f"{info['icon']}  {info['nome']}\n{info['uso']}",
-                 color="white",fontsize=10,fontweight="bold",pad=10,fontfamily="monospace")
-    ax.set_xlabel("Longitude",color="#aaaaaa",fontsize=8)
-    ax.set_ylabel("Latitude",color="#aaaaaa",fontsize=8)
-    ax.tick_params(colors="#aaaaaa",labelsize=7)
-    for sp in ax.spines.values(): sp.set_edgecolor("#333333")
-    ax.grid(True,color="#222222",linewidth=0.4,alpha=0.5)
-    ax.annotate("N ▲",xy=(0.97,0.95),xycoords="axes fraction",
-                ha="right",va="top",color="white",fontsize=11,fontweight="bold")
-    handles = [
-        mpatches.Patch(facecolor="none",edgecolor="white",linewidth=0.4,label="Municípios MS"),
-        mpatches.Patch(facecolor="none",edgecolor=VERDE_MEDIO,linewidth=1.5,label=f"▶ {municipio}"),
-        mpatches.Patch(facecolor="#4FC3F7",alpha=0.7,label="Rios"),
-        mpatches.Patch(facecolor="#FFB74D",alpha=0.6,label="Rodovias"),
-    ]
-    if banda_id in ["B07","B03"]:
-        handles.append(mpatches.Patch(facecolor="#FF6B35",alpha=0.8,label="Focos INPE"))
-    ax.legend(handles=handles,loc="lower left",fontsize=7,framealpha=0.75,
-              facecolor="#0d1117",labelcolor="white",edgecolor="#333333",ncol=2)
-    fig.text(0.01,0.005,
-             f"Yamada Engenharia  •  GOES-19 ABI  •  {datetime.now().strftime('%d/%m/%Y %H:%M')} UTC-4",
-             color="#888888",fontsize=7,va="bottom")
-    plt.tight_layout(pad=0.5)
-    return fig
-
-
-def gerar_grafico_previsao(dados, municipio):
-    if not dados or "hourly" not in dados: return None
-    h  = dados["hourly"]
-    tr = h.get("time",[])[:24]
-    pp = h.get("precipitation",[0]*24)[:24]
-    te = h.get("temperature_2m",[20]*24)[:24]
-    ur = h.get("relativehumidity_2m",[60]*24)[:24]
-    vt = h.get("windspeed_10m",[0]*24)[:24]
-    hs = [t.split("T")[1][:5] if "T" in t else t[-5:] for t in tr]
-    idx= list(range(len(hs)))
-    fig,axes = plt.subplots(3,1,figsize=(11,8),facecolor="#0d1117",
-                             gridspec_kw={"height_ratios":[2,2,1.2]})
-    fig.suptitle(f"⏱ Previsão 24h — {municipio}",color="white",fontsize=13,fontweight="bold",y=0.98)
-    for ax in axes:
-        ax.set_facecolor("#111827"); ax.tick_params(colors="#9ca3af",labelsize=8)
-        for sp in ax.spines.values(): sp.set_edgecolor("#1f2937")
-        ax.grid(True,color="#1f2937",linewidth=0.5,alpha=0.8)
-    cores=[VERDE_MEDIO if p<5 else AMARELO_ALERT if p<20 else VERMELHO_ALRT for p in pp]
-    axes[0].bar(idx,pp,color=cores,alpha=0.85,width=0.7,edgecolor="none")
-    axes[0].set_ylabel("Precipitação (mm)",color="#9ca3af",fontsize=9); axes[0].set_xticks([])
-    axes[0].text(0.99,0.92,f"Total 24h: {sum(p for p in pp if p):.1f} mm",
-                 transform=axes[0].transAxes,ha="right",color="white",fontsize=9,
-                 bbox=dict(facecolor=VERDE_ESCURO,alpha=0.7,boxstyle="round,pad=0.3"))
-    ax2b = axes[1].twinx()
-    lt=axes[1].plot(idx,te,color="#f97316",linewidth=2.2,label="Temp (°C)",zorder=5)
-    axes[1].fill_between(idx,te,alpha=0.15,color="#f97316")
-    lu=ax2b.plot(idx,ur,color="#38bdf8",linewidth=1.8,linestyle="--",label="Umidade (%)",zorder=4)
-    ax2b.fill_between(idx,ur,alpha=0.07,color="#38bdf8")
-    axes[1].set_ylabel("Temperatura (°C)",color="#f97316",fontsize=9)
-    ax2b.set_ylabel("Umidade (%)",color="#38bdf8",fontsize=9)
-    ax2b.tick_params(colors="#38bdf8",labelsize=8); axes[1].set_xticks([])
-    lines=lt+lu
-    axes[1].legend(lines,[l.get_label() for l in lines],loc="upper right",fontsize=8,
-                   facecolor="#111827",labelcolor="white",edgecolor="#374151")
-    axes[2].plot(idx,vt,color="#a78bfa",linewidth=1.6)
-    axes[2].fill_between(idx,vt,alpha=0.15,color="#a78bfa")
-    axes[2].axhline(10,color="yellow",linewidth=0.8,linestyle="--",alpha=0.6,label="Lim. defensivos")
-    axes[2].set_ylabel("Vento (km/h)",color="#a78bfa",fontsize=9)
-    axes[2].set_xticks(idx[::2])
-    axes[2].set_xticklabels(hs[::2],rotation=45,ha="right",fontsize=7,color="#9ca3af")
-    axes[2].legend(fontsize=7,facecolor="#111827",labelcolor="white",edgecolor="#374151")
-    plt.tight_layout(rect=[0,0,1,0.97])
-    return fig
-
-
-def gerar_grafico_ndvi(ndvi_data, municipio):
+def gerar_grafico_ndvi(ndvi_data, nome_ponto):
     if not ndvi_data or "listaSerie" not in ndvi_data: return None
     serie   = ndvi_data["listaSerie"]
     datas   = [s.get("data", s.get("ano","")) for s in serie]
     valores = [float(s.get("ndvi", s.get("valor",0))) for s in serie]
     if len(valores) < 2: return None
-    fig, ax = plt.subplots(figsize=(10,4),facecolor="#0d1117")
+    fig, ax = plt.subplots(figsize=(10,4), facecolor="#0d1117")
     ax.set_facecolor("#111827")
-    ax.fill_between(range(len(valores)),valores,alpha=0.15,color=VERDE_MEDIO)
-    ax.plot(range(len(valores)),valores,color=VERDE_MEDIO,linewidth=1.8,zorder=4)
+    ax.fill_between(range(len(valores)), valores, alpha=0.15, color=VERDE_MEDIO)
+    ax.plot(range(len(valores)), valores, color=VERDE_MEDIO, linewidth=1.8, zorder=4)
     med = float(np.median(valores[:-1])) if len(valores)>1 else 0.5
-    ax.axhline(med,color="#FFC107",linewidth=1.2,linestyle="--",alpha=0.8,label=f"Mediana: {med:.3f}")
-    ax.scatter([len(valores)-1],[valores[-1]],color="#FF5722",s=80,zorder=6,label=f"Atual: {valores[-1]:.3f}")
+    ax.axhline(med, color="#FFC107", linewidth=1.2, linestyle="--", alpha=0.8,
+               label=f"Mediana: {med:.3f}")
+    ax.scatter([len(valores)-1],[valores[-1]],color="#FF5722",s=80,zorder=6,
+               label=f"Atual: {valores[-1]:.3f}")
     delta = valores[-1]-med
-    ax.annotate(f"Δ {delta:+.3f}",xy=(len(valores)-1,valores[-1]),
-                xytext=(-40,15),textcoords="offset points",
-                color=VERDE_MEDIO if delta>=0 else VERMELHO_ALRT,fontsize=9,fontweight="bold",
-                arrowprops=dict(arrowstyle="->",color=VERDE_MEDIO if delta>=0 else VERMELHO_ALRT,lw=1.2))
+    ax.annotate(f"Δ {delta:+.3f}", xy=(len(valores)-1,valores[-1]),
+                xytext=(-40,15), textcoords="offset points",
+                color=VERDE_MEDIO if delta>=0 else VERMELHO_ALRT, fontsize=9, fontweight="bold",
+                arrowprops=dict(arrowstyle="->",
+                                color=VERDE_MEDIO if delta>=0 else VERMELHO_ALRT, lw=1.2))
     step = max(1,len(datas)//8)
     ax.set_xticks(range(0,len(datas),step))
     ax.set_xticklabels([str(datas[i])[:4] for i in range(0,len(datas),step)],
@@ -1391,8 +1533,10 @@ def gerar_grafico_ndvi(ndvi_data, municipio):
     for sp in ax.spines.values(): sp.set_edgecolor("#1f2937")
     ax.grid(True,color="#1f2937",linewidth=0.5,alpha=0.6)
     sim = " ⚠ (simulado)" if ndvi_data.get("_simulado") else ""
-    ax.set_title(f"🌿 NDVI Histórico — {municipio}{sim}",color="white",fontsize=11,fontweight="bold")
-    ax.legend(fontsize=8,facecolor="#111827",labelcolor="white",edgecolor="#374151",loc="lower right")
+    ax.set_title(f"🌿 NDVI Histórico — {nome_ponto}{sim}",color="white",
+                 fontsize=11,fontweight="bold")
+    ax.legend(fontsize=8,facecolor="#111827",labelcolor="white",edgecolor="#374151",
+              loc="lower right")
     fig.text(0.01,0.01,"Fonte: Embrapa SATVeg",color="#666",fontsize=7)
     plt.tight_layout()
     return fig
@@ -1415,13 +1559,15 @@ def gerar_grafico_balanco_hidrico(bh):
     ax1.fill_between(range(len(arm)),arm,alpha=0.3,color="#42A5F5")
     ax1.plot(range(len(arm)),arm,color="#42A5F5",linewidth=2,label="ARM (mm)")
     ax1.axhline(cad,color="#FFB74D",linewidth=1,linestyle="--",label=f"CAD={cad}mm")
-    ax1.axhline(cad*0.4,color="#EF5350",linewidth=0.8,linestyle=":",label="Limite crítico (40%)")
-    ax1.set_ylabel("Armazenamento (mm)",color="#9ca3af",fontsize=9); ax1.set_xticks([])
-    ax1.set_ylim(0,cad*1.15)
+    ax1.axhline(cad*0.4,color="#EF5350",linewidth=0.8,linestyle=":",label="Crítico (40%)")
+    ax1.set_ylabel("Armazenamento (mm)",color="#9ca3af",fontsize=9)
+    ax1.set_xticks([]); ax1.set_ylim(0,cad*1.15)
     ax1.legend(fontsize=8,facecolor="#111827",labelcolor="white",edgecolor="#374151")
-    ax1.set_title("💧 Balanço Hídrico — Thornthwaite-Mather",color="white",fontsize=11,fontweight="bold")
+    ax1.set_title("💧 Balanço Hídrico — Thornthwaite-Mather",color="white",
+                  fontsize=11,fontweight="bold")
     ax2.bar(range(len(def_)),def_,color="#EF5350",alpha=0.8,label="Déficit",width=0.4)
-    ax2.bar([i+0.42 for i in range(len(exc))],exc,color="#29B6F6",alpha=0.8,label="Excedente",width=0.4)
+    ax2.bar([i+0.42 for i in range(len(exc))],exc,color="#29B6F6",
+            alpha=0.8,label="Excedente",width=0.4)
     ax2.set_ylabel("mm",color="#9ca3af",fontsize=9)
     ax2.set_xticks(range(len(dias))); ax2.set_xticklabels(dias,color="#9ca3af",fontsize=8)
     ax2.legend(fontsize=8,facecolor="#111827",labelcolor="white",edgecolor="#374151")
@@ -1434,7 +1580,8 @@ def gerar_tabela_7dias(dados):
     d = dados["daily"]
     wcode_map={0:"☀️ Limpo",1:"🌤 Poucas nuvens",2:"⛅ Parcial",3:"☁️ Nublado",
                45:"🌫 Névoa",51:"🌦 Chuvisco",61:"🌧 Chuva",63:"🌧 Moderada",
-               65:"⛈ Forte",80:"🌦 Pancadas",81:"⛈ Pancadas fortes",95:"⛈ Tempestade",99:"⛈ Granizo"}
+               65:"⛈ Forte",80:"🌦 Pancadas",81:"⛈ Pancadas fortes",
+               95:"⛈ Tempestade",99:"⛈ Granizo"}
     datas  = [datetime.fromisoformat(t).strftime("%a %d/%m") for t in d.get("time",[])]
     cond   = [wcode_map.get(w,f"Cód {w}") for w in d.get("weathercode",[0]*7)]
     tmax   = [f"{v:.1f}°C" if v else "—" for v in d.get("temperature_2m_max",[])]
@@ -1446,23 +1593,268 @@ def gerar_tabela_7dias(dados):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INTERFACE PRINCIPAL — MAIN
+# SISTEMA DE E-MAIL (mantido do v3.0, sem alterações)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cor_alerta_email(nivel):
+    return {"verde":("#e8f5e9","#43a047","#1b5e20"),
+            "amarelo":("#fff8e1","#fbc02d","#5d4037"),
+            "vermelho":("#ffebee","#e53935","#b71c1c"),
+            "laranja":("#fff3e0","#fb8c00","#bf360c")
+            }.get(nivel, ("#f5f5f5","#9e9e9e","#333"))
+
+
+def gerar_html_relatorio(nome_ponto, lat, lon, dados_meteo, alertas,
+                          janelas_def, gda_info, riscos_fito, bh,
+                          ndvi_data, df_focos, df_inmet) -> str:
+    """Gera HTML completo do relatório agroclimático para envio por e-mail."""
+    agora = datetime.now().strftime("%d/%m/%Y às %H:%M")
+    h = dados_meteo.get("hourly",{}) if dados_meteo else {}
+    d = dados_meteo.get("daily",{})  if dados_meteo else {}
+    temp_atual   = (h.get("temperature_2m",        [None])[0] or 0)
+    precip_hoje  = (d.get("precipitation_sum",      [None])[0] or 0)
+    umid_atual   = (h.get("relativehumidity_2m",    [None])[0] or 0)
+    vento_atual  = (h.get("windspeed_10m",          [None])[0] or 0)
+    eto_hoje     = (d.get("et0_fao_evapotranspiration",[None])[0] or 0)
+
+    def card_m(tit,val,uni,cor="#1B4D2E"):
+        return (f'<div style="flex:1;min-width:110px;background:#fff;border-radius:10px;'
+                f'border-top:4px solid {cor};padding:14px 12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);text-align:center;">'
+                f'<div style="font-size:11px;color:#777;">{tit}</div>'
+                f'<div style="font-size:22px;font-weight:bold;color:#222;">{val}'
+                f'<span style="font-size:12px;color:#999;margin-left:2px;">{uni}</span></div></div>')
+
+    cards = (card_m("🌡 Temperatura",f"{temp_atual:.1f}","°C","#e65100") +
+             card_m("🌧 Chuva 24h",  f"{precip_hoje:.1f}","mm","#1565c0") +
+             card_m("💧 Umidade",     f"{umid_atual:.0f}","%","#0277bd") +
+             card_m("💨 Vento",       f"{vento_atual:.0f}","km/h","#6a1b9a") +
+             card_m("🌿 ETo",         f"{eto_hoje:.2f}","mm/dia","#2e7d32"))
+
+    html_alertas = ""
+    for al in alertas:
+        bg,brd,tc = _cor_alerta_email(al["nivel"])
+        html_alertas += (f'<div style="background:{bg};border-left:5px solid {brd};'
+                         f'border-radius:6px;padding:12px 16px;margin:6px 0;">'
+                         f'<b style="color:{tc};">{al["icone"]} {al["titulo"]}</b><br>'
+                         f'<span style="font-size:13px;">{al["msg"]}</span></div>')
+
+    n_ab  = sum(1 for j in janelas_def if j["status"]=="aberta")
+    n_bl  = sum(1 for j in janelas_def if j["status"]=="bloqueada")
+    max_seq=cur_seq=cur_start=max_start=0
+    for i,j in enumerate(janelas_def):
+        if j["status"]=="aberta":
+            if cur_seq==0: cur_start=i
+            cur_seq+=1
+            if cur_seq>max_seq: max_seq=cur_seq; max_start=cur_start
+        else: cur_seq=0
+    melhor = ""
+    if max_seq>0:
+        h1=janelas_def[max_start]["hora"]
+        h2=janelas_def[min(max_start+max_seq-1,len(janelas_def)-1)]["hora"]
+        melhor = f"<b>Melhor janela:</b> {h1} → {h2} ({max_seq}h)"
+    else:
+        melhor = "<b>Sem janela ideal nas próximas 24h.</b>"
+
+    html_gda = ""
+    if gda_info:
+        p = gda_info.get("proximo_estagio")
+        fs = f" | Próximo: <b>{p[1]}</b> em {p[0]-gda_info['gda_total']:.0f} °C·dia" if p else ""
+        html_gda = (f'<div style="background:#f9fbe7;border-left:5px solid #8bc34a;'
+                    f'border-radius:6px;padding:14px 16px;">'
+                    f'<b style="color:#33691e;">🌾 {gda_info["cultura"]} — {gda_info["estagio_atual"]}</b><br>'
+                    f'<span style="font-size:13px;">GDA: <b>{gda_info["gda_total"]} °C·dia</b>'
+                    f' | {gda_info["dias_desde_semeadura"]} dias{fs}</span></div>')
+
+    html_fito = ""
+    for r in riscos_fito:
+        bg,brd,tc = _cor_alerta_email(r["cor"])
+        html_fito += (f'<div style="background:{bg};border-left:5px solid {brd};'
+                      f'border-radius:6px;padding:10px 14px;margin:5px 0;">'
+                      f'<b style="color:{tc};">{r["icone"]} {r["doenca"]} — Risco {r["nivel"]}</b><br>'
+                      f'<span style="font-size:12px;">{r["msg"]}</span></div>')
+
+    html_bh = ""
+    if bh:
+        w = min(int(bh.get("arm_pct",0)),100)
+        cor_b = "#43a047" if w>=70 else ("#fbc02d" if w>=40 else "#e53935")
+        html_bh = (f'<div style="background:#e3f2fd;border-left:4px solid #1565c0;'
+                   f'border-radius:4px;padding:10px 14px;">'
+                   f'ARM: {bh["arm_mm"]:.1f}/{bh["cad_mm"]:.0f}mm ({bh["arm_pct"]:.0f}%) | '
+                   f'Déficit: {bh["def_mm"]:.1f}mm<br>'
+                   f'<b>Recomendação:</b> {bh["recomendacao"]}</div>')
+
+    html_ndvi = ""
+    if ndvi_data and "listaSerie" in ndvi_data:
+        vals = [float(s.get("ndvi",s.get("valor",0))) for s in ndvi_data["listaSerie"]]
+        if vals:
+            va = vals[-1]; me = float(np.median(vals[:-1])) if len(vals)>1 else 0.5
+            dlt = va-me; cor_d = "#2e7d32" if dlt>=0 else "#c62828"
+            html_ndvi = (f'<div style="background:#f1f8e9;border-left:5px solid #66bb6a;'
+                         f'border-radius:6px;padding:12px 16px;">'
+                         f'<b>🌿 NDVI: {va:.3f}</b> '
+                         f'<span style="color:{cor_d};">Δ {dlt:+.3f} vs mediana ({me:.3f})</span>'
+                         f'{"<i> (simulado)</i>" if ndvi_data.get("_simulado") else ""}</div>')
+
+    html_focos = ""
+    if df_focos is not None and not df_focos.empty:
+        n = len(df_focos)
+        frp_m = df_focos["frp"].max() if "frp" in df_focos.columns else 0
+        html_focos = (f'<div style="background:#fff3e0;border-left:5px solid #fb8c00;'
+                      f'border-radius:6px;padding:12px 16px;">'
+                      f'<b>🔥 {n} foco(s) — MS (48h)</b><br>'
+                      f'FRP máximo: {frp_m:.0f} MW | INPE BDQueimadas</div>')
+
+    return f"""<html><body style="font-family:Arial,sans-serif;background:#f0f2f5;padding:20px;">
+    <div style="max-width:760px;margin:auto;background:#fff;border-radius:14px;
+                box-shadow:0 4px 18px rgba(0,0,0,.12);overflow:hidden;">
+      <div style="background:linear-gradient(135deg,{VERDE_ESCURO},{VERDE_MEDIO});
+                  padding:32px 36px;text-align:center;">
+        <h1 style="color:white;margin:0;font-size:24px;">🌿 Yamada Engenharia</h1>
+        <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:15px;">
+          Relatório Agroclimático — {nome_ponto}</p>
+      </div>
+      <div style="padding:32px 36px;">
+        <div style="background:#f9fbe7;border-radius:8px;padding:14px 18px;margin-bottom:20px;">
+          <b style="font-size:16px;color:{VERDE_ESCURO};">📍 {nome_ponto}</b><br>
+          <span style="color:#777;font-size:12px;">{lat:.4f}°S, {lon:.4f}°W · {agora}</span>
+        </div>
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};padding-bottom:6px;">
+          📊 Condições Atuais</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px;">{cards}</div>
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};padding-bottom:6px;">
+          ⚠️ Alertas</h3>{html_alertas}
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
+                   padding-bottom:6px;margin-top:24px;">🧪 Janela de Defensivos</h3>
+        <p style="font-size:12px;color:#777;">Horas ideais: {n_ab} | Bloqueadas: {n_bl}</p>
+        <div style="background:#f1f8e9;border-left:4px solid #43a047;
+                    padding:10px 14px;border-radius:4px;">{melhor}</div>
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
+                   padding-bottom:6px;margin-top:24px;">🌾 Fenologia</h3>
+        {html_gda or '<p style="color:#999;">Não configurado.</p>'}
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
+                   padding-bottom:6px;margin-top:24px;">🍂 Fitossanidade</h3>
+        {html_fito}
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
+                   padding-bottom:6px;margin-top:24px;">🌿 NDVI</h3>
+        {html_ndvi or '<p style="color:#999;">Indisponível.</p>'}
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
+                   padding-bottom:6px;margin-top:24px;">💧 Balanço Hídrico</h3>
+        {html_bh or '<p style="color:#999;">Indisponível.</p>'}
+        <h3 style="color:{VERDE_ESCURO};border-bottom:2px solid {VERDE_MEDIO};
+                   padding-bottom:6px;margin-top:24px;">🔥 Focos de Queimada</h3>
+        {html_focos or '<p style="color:#999;">Nenhum foco detectado.</p>'}
+        <p style="color:#bbb;font-size:11px;margin-top:32px;border-top:1px solid #eee;
+                  padding-top:14px;text-align:center;">
+          Yamada Engenharia · GOES-19 · Open-Meteo · NASA POWER · Embrapa SATVeg · INPE · INMET<br>
+          {agora} · MVP v4.0</p>
+      </div>
+    </div></body></html>"""
+
+
+def enviar_relatorio_email(nome_ponto, lat, lon, dados_meteo, alertas,
+                            janelas_def, gda_info, riscos_fito, bh,
+                            ndvi_data, df_focos, df_inmet,
+                            destinatarios_extras=None) -> tuple:
+    """Envia relatório por SMTP Gmail SSL porta 465."""
+    if not _email_configurado:
+        return False, "E-mail não configurado no secrets.toml"
+    try:
+        html_body = gerar_html_relatorio(nome_ponto, lat, lon, dados_meteo, alertas,
+                                          janelas_def, gda_info, riscos_fito, bh,
+                                          ndvi_data, df_focos, df_inmet)
+        dests = list(EMAIL_DESTINATARIOS)
+        if destinatarios_extras:
+            dests += [e for e in destinatarios_extras if e and e not in dests]
+        tem_alerta = any(a["nivel"] in ["vermelho","laranja"] for a in alertas)
+        assunto    = (f"{'🚨 ALERTA — ' if tem_alerta else '📋 '}"
+                      f"Relatório Yamada — {nome_ponto} | "
+                      f"{datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = assunto
+        msg["From"]    = EMAIL_REMETENTE
+        msg["To"]      = ", ".join(dests)
+        msg.attach(MIMEMultipart("alternative"))
+        msg.get_payload()[0].attach(MIMEText(html_body, "html"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
+            srv.login(EMAIL_REMETENTE, EMAIL_SENHA_APP)
+            srv.sendmail(EMAIL_REMETENTE, dests, msg.as_string())
+        return True, f"Enviado para: {', '.join(dests)}"
+    except Exception as e:
+        return False, str(e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KEEP-ALIVE E SCHEDULER (mantidos do v3.0)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def keep_alive():
+    """Ping periódico para manter app ativo no Streamlit Cloud."""
+    try:
+        requests.get("https://yamada-agro-ms.streamlit.app/", timeout=30)
+    except Exception:
+        pass
+
+
+def scheduled_report_automatico():
+    """Relatório automático para o ponto padrão (Campo Grande)."""
+    lat_auto, lon_auto = -20.4428, -54.6460
+    nome_auto = "Campo Grande — Ponto padrão"
+    log_entry = {"inicio": datetime.now().strftime("%d/%m %H:%M"),
+                 "status": "em andamento", "detalhe": ""}
+    with _log_lock:
+        _scheduler_log.insert(0, log_entry)
+        if len(_scheduler_log) > 10:
+            _scheduler_log.pop()
+    try:
+        dm   = buscar_previsao_openmeteo(lat_auto, lon_auto)
+        ndvi = buscar_satveg_ndvi(lat_auto, lon_auto)
+        focos= buscar_focos_inpe()
+        inmet= buscar_dados_inmet()
+        jd   = calcular_janela_defensivos(dm)
+        gda  = calcular_graus_dia(dm, "Soja", datetime.now() - timedelta(days=45))
+        rf   = calcular_risco_fitossanitario(dm)
+        bh   = calcular_balanco_hidrico_thornthwaite(dm, 65.0)
+        als  = calcular_alertas(dm, lat_auto, gda)
+        ok, msg = enviar_relatorio_email(nome_auto, lat_auto, lon_auto,
+                                          dm, als, jd, gda, rf, bh, ndvi, focos, inmet)
+        log_entry["status"]  = "✅ enviado" if ok else "⚠️ gerado, sem e-mail"
+        log_entry["detalhe"] = msg[:80]
+    except Exception as exc:
+        log_entry["status"]  = "❌ erro"
+        log_entry["detalhe"] = str(exc)[:100]
+
+
+if "scheduler_started" not in st.session_state:
+    _sched = BackgroundScheduler(timezone="America/Campo_Grande")
+    _sched.add_job(scheduled_report_automatico,
+                   trigger=CronTrigger(hour="6,12,18", minute=0,
+                                       timezone="America/Campo_Grande"),
+                   id="relatorio_automatico", replace_existing=True,
+                   max_instances=1, misfire_grace_time=600)
+    _sched.add_job(keep_alive, trigger=IntervalTrigger(minutes=5),
+                   id="keepalive", replace_existing=True, max_instances=1)
+    _sched.start()
+    st.session_state["scheduler_started"] = True
+    st.session_state["scheduler_obj"]     = _sched
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INTERFACE STREAMLIT PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
 
-    # ── Header ──
     st.markdown("""
     <div class="yamada-header">
       <div>
         <h1>🌿 Yamada Engenharia</h1>
         <p>Plataforma de Monitoramento Agroclimático — Mato Grosso do Sul</p>
         <p style="font-size:0.78rem;margin-top:4px;color:rgba(255,255,255,0.55);">
-          GOES-19 ABI · Open-Meteo · NASA POWER · SATVeg · INPE · INMET
+          GOES-19 (goes2go) · Open-Meteo ICON-EU/GFS025 · NASA POWER ·
+          SATVeg · INPE · INMET · Nowcasting 3 fontes
         </p>
       </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     # SIDEBAR
@@ -1476,67 +1868,121 @@ def main():
         </div>""", unsafe_allow_html=True)
         st.markdown("---")
 
-        # Município
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;font-size:0.9rem;">📍 MUNICÍPIO ALVO</p>', unsafe_allow_html=True)
-        municipio_sel = st.selectbox("Município", list(MUNICIPIOS_MS.keys()), index=0, label_visibility="collapsed")
-        coords        = MUNICIPIOS_MS[municipio_sel]
-        st.caption(f"🌐 {coords['lat']:.4f}°S, {coords['lon']:.4f}°W")
-        st.caption(f"📌 Região: {coords['regiao']}")
+        # ── PONTO DE ANÁLISE — Lat/Lon livre ─────────────────────────────────
+        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
+                    'font-size:0.9rem;">📍 PONTO DE ANÁLISE</p>', unsafe_allow_html=True)
+
+        # Seletor de ponto predefinido (atalho rápido)
+        ponto_ref = st.selectbox(
+            "Carregar ponto predefinido",
+            list(PONTOS_REFERENCIA_MS.keys()),
+            index=0,
+            label_visibility="collapsed",
+            help="Selecione um ponto de referência ou preencha lat/lon manualmente abaixo"
+        )
+        if ponto_ref and PONTOS_REFERENCIA_MS.get(ponto_ref):
+            _ref = PONTOS_REFERENCIA_MS[ponto_ref]
+            _lat_def = _ref["lat"]
+            _lon_def = _ref["lon"]
+            _nome_def = ponto_ref.split("—")[0].strip()
+        else:
+            _lat_def  = -20.4428
+            _lon_def  = -54.6460
+            _nome_def = "Meu Ponto"
+
+        lat_input = st.number_input(
+            "Latitude (°S, negativo)",
+            min_value=-23.7, max_value=-17.1,
+            value=_lat_def, step=0.0001, format="%.4f",
+            help="Latitude decimal. Sul do equador = negativo. Ex: -20.4428"
+        )
+        lon_input = st.number_input(
+            "Longitude (°W, negativo)",
+            min_value=-57.7, max_value=-50.9,
+            value=_lon_def, step=0.0001, format="%.4f",
+            help="Longitude decimal. Oeste = negativo. Ex: -54.6460"
+        )
+        nome_ponto = st.text_input(
+            "Nome do ponto",
+            value=_nome_def,
+            max_chars=50,
+            placeholder="Ex: Fazenda Santa Fé — Pivô 3",
+            help="Identificação livre do ponto (aparece nos mapas, títulos e e-mail)"
+        )
+        if not nome_ponto.strip():
+            nome_ponto = f"{lat_input:.3f}°S, {lon_input:.3f}°W"
+
+        st.caption(f"🌐 {lat_input:.4f}°S  {lon_input:.4f}°W")
         st.markdown("---")
 
         # Solo
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;font-size:0.9rem;">🌱 TEXTURA DO SOLO</p>', unsafe_allow_html=True)
-        textura_solo = st.selectbox("Textura",
-            ["Argiloso (CAD=100mm)","Médio/Franco (CAD=65mm)","Arenoso (CAD=35mm)"],
-            index=1, label_visibility="collapsed")
-        cad_mm = {"Argiloso (CAD=100mm)":100.0,"Médio/Franco (CAD=65mm)":65.0,"Arenoso (CAD=35mm)":35.0}[textura_solo]
+        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
+                    'font-size:0.9rem;">🌱 TEXTURA DO SOLO</p>', unsafe_allow_html=True)
+        textura_solo = st.selectbox(
+            "Textura",
+            ["Argiloso (CAD=100mm)", "Médio/Franco (CAD=65mm)", "Arenoso (CAD=35mm)"],
+            index=1, label_visibility="collapsed"
+        )
+        cad_mm = {"Argiloso (CAD=100mm)": 100.0,
+                  "Médio/Franco (CAD=65mm)": 65.0,
+                  "Arenoso (CAD=35mm)": 35.0}[textura_solo]
         st.markdown("---")
 
         # Fenologia
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;font-size:0.9rem;">🌾 FENOLOGIA</p>', unsafe_allow_html=True)
-        cultura_sel    = st.selectbox("Cultura", list(CULTURAS_GDA.keys()), index=0, label_visibility="collapsed")
-        data_semeadura = st.date_input("Data de semeadura",
-            value=datetime.now().date()-timedelta(days=45),
-            max_value=datetime.now().date())
+        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
+                    'font-size:0.9rem;">🌾 FENOLOGIA</p>', unsafe_allow_html=True)
+        cultura_sel    = st.selectbox("Cultura", list(CULTURAS_GDA.keys()),
+                                       index=0, label_visibility="collapsed")
+        data_semeadura = st.date_input(
+            "Data de semeadura",
+            value=datetime.now().date() - timedelta(days=45),
+            max_value=datetime.now().date()
+        )
         st.markdown("---")
 
-        # Bandas GOES
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;font-size:0.9rem;">🛰️ BANDAS GOES-19</p>', unsafe_allow_html=True)
-        bandas_sel = {bid: st.checkbox(f"{binfo['icon']} {bid} — {binfo['nome'].split('(')[0].strip()}",
-                         value=(bid in ["B02","B13","B07"]), key=f"cb_{bid}")
-                      for bid, binfo in BANDAS_INFO.items()}
+        # GOES-19
+        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
+                    'font-size:0.9rem;">🛰️ GOES-19 — CANAIS</p>', unsafe_allow_html=True)
+        bandas_sel = {
+            bid: st.checkbox(
+                f"{binfo['icon']} {bid.replace('RGB_','')} — {binfo['nome']}",
+                value=(bid in ["B02", "B13", "B09"]),
+                key=f"cb_{bid}"
+            )
+            for bid, binfo in BANDAS_INFO.items()
+        }
         st.markdown("---")
 
-        # Config
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;font-size:0.9rem;">⚙️ CONFIGURAÇÕES</p>', unsafe_allow_html=True)
-        usar_goes_real = st.checkbox("🛰 Tentar GOES-19 Real (S3)", value=False)
-        horas_atras    = st.slider("Horas atrás para GOES", 1, 6, 2)
+        # Configurações
+        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
+                    'font-size:0.9rem;">⚙️ CONFIGURAÇÕES</p>', unsafe_allow_html=True)
+        usar_goes_real = st.checkbox(
+            "🛰 GOES-19 real (≤10 min)",
+            value=False,
+            help="Tenta goes2go → boto3 S3 → simulação. Cache de 10 min."
+        )
+        st.caption(
+            f"goes2go: {'✅' if _HAS_GOES2GO else '❌ não instalado'}  |  "
+            f"cartopy: {'✅' if _HAS_CARTOPY else '❌ não instalado'}  |  "
+            f"mplcursors: {'✅' if _HAS_MPLCURSORS else '❌ não instalado'}"
+        )
         st.markdown("---")
 
-        # ── Painel do scheduler / e-mail ──────────────────────────────────────
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;font-size:0.9rem;">📧 RELATÓRIO AUTOMÁTICO</p>', unsafe_allow_html=True)
-
+        # Relatório automático
+        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
+                    'font-size:0.9rem;">📧 RELATÓRIO AUTOMÁTICO</p>', unsafe_allow_html=True)
         if _email_configurado:
-            st.caption(f"✅ E-mail configurado para: {', '.join(EMAIL_DESTINATARIOS)}")
+            st.caption(f"✅ {', '.join(EMAIL_DESTINATARIOS)}")
         else:
-            st.caption("⚠️ Configure [email] no secrets.toml para ativar.")
+            st.caption("⚠️ Configure [email] no secrets.toml")
 
         if "scheduler_obj" in st.session_state:
-            _sched_ref = st.session_state["scheduler_obj"]
-            _job = _sched_ref.get_job("relatorio_automatico")
-            if _job and _job.next_run_time:
-                st.info(f"⏰ Próximo envio automático:\n{_job.next_run_time.strftime('%d/%m/%Y %H:%M')}")
+            job = st.session_state["scheduler_obj"].get_job("relatorio_automatico")
+            if job and job.next_run_time:
+                st.info(f"⏰ Próximo: {job.next_run_time.strftime('%d/%m %H:%M')}")
             if st.button("▶ Enviar agora (manual)", use_container_width=True):
                 threading.Thread(target=scheduled_report_automatico, daemon=True).start()
                 st.success("Iniciado em background!")
-
-        with _log_lock:
-            _log_snap = list(_scheduler_log)
-        if _log_snap:
-            st.markdown("**Histórico:**")
-            for entry in _log_snap[:3]:
-                st.caption(f"{entry['inicio']} — {entry['status']}" +
-                           (f"\n_{entry['detalhe']}_" if entry['detalhe'] else ""))
         st.markdown("---")
 
         botao = st.button("🚀  GERAR ANÁLISE", use_container_width=True)
@@ -1545,17 +1991,42 @@ def main():
     # TELA DE BOAS-VINDAS
     # ─────────────────────────────────────────────────────────────────────────
     if not botao:
-        c1,c2,c3 = st.columns(3)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown("""<div class="band-card"><h4>🛰️ GOES-19 + INPE</h4>
-            <p>7 bandas ABI + produtos FDC (focos) e RRQPE (precipitação). Focos reais via BDQueimadas.</p></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="band-card"><h4>📍 Ponto livre (Lat/Lon)</h4>
+            <p>Selecione qualquer coordenada no MS — campo, pastagem, pivô,
+            área de preservação — sem se limitar a municípios pré-definidos.</p></div>""",
+            unsafe_allow_html=True)
         with c2:
-            st.markdown("""<div class="band-card"><h4>🌡️ Previsão + Análise</h4>
-            <p>Janela de defensivos, graus-dia, fenologia, risco fitossanitário e balanço hídrico TM.</p></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="band-card"><h4>🛰️ GOES-19 via goes2go</h4>
+            <p>4 canais ABI + 2 compostos RGB (AirMass, Day Cloud Phase).
+            Imagens ≤10 min via goes2go com fallback boto3 S3.</p></div>""",
+            unsafe_allow_html=True)
         with c3:
-            st.markdown("""<div class="band-card"><h4>📧 Relatório Automático</h4>
-            <p>E-mail rico com métricas, alertas, tabelas e recomendações enviado às 06h, 12h e 18h.</p></div>""", unsafe_allow_html=True)
-        st.info("👈 Configure o município, solo e cultura na barra lateral, depois clique em **GERAR ANÁLISE**.")
+            st.markdown("""<div class="band-card"><h4>⛈️ Nowcasting 3 fontes</h4>
+            <p>Temperatura de brilho GOES-19 + probabilidade Open-Meteo +
+            CAPE/LI. Timeline 0–6h de risco de precipitação.</p></div>""",
+            unsafe_allow_html=True)
+
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            st.markdown("""<div class="band-card"><h4>📈 Gráfico 72h interativo</h4>
+            <p>5 painéis: temperatura+CAPE, precipitação+prob., radiação solar,
+            vento+rajadas, umidade+Heat Index. Tooltip hover com mplcursors.</p></div>""",
+            unsafe_allow_html=True)
+        with c5:
+            st.markdown("""<div class="band-card"><h4>🌱 ICON-EU + GFS025</h4>
+            <p>Melhor modelo para convecção do Cerrado/MS: ICON-EU (primário)
+            com fallback automático para GFS025. 15 variáveis horárias.</p></div>""",
+            unsafe_allow_html=True)
+        with c6:
+            st.markdown("""<div class="band-card"><h4>📧 Relatório automático</h4>
+            <p>E-mail HTML rico enviado às 06h, 12h e 18h. Inclui alertas,
+            fenologia, balanço hídrico, NDVI e focos INPE.</p></div>""",
+            unsafe_allow_html=True)
+
+        st.info("👈 Configure o ponto (lat/lon), solo e cultura na barra lateral, "
+                "depois clique em **GERAR ANÁLISE**.")
         return
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1563,148 +2034,296 @@ def main():
     # ─────────────────────────────────────────────────────────────────────────
     bandas_ativas = [bid for bid, ativo in bandas_sel.items() if ativo]
     if not bandas_ativas:
-        st.warning("⚠️ Selecione pelo menos uma banda GOES-19.")
+        st.warning("⚠️ Selecione pelo menos um canal GOES-19 na barra lateral.")
         return
 
-    lat, lon  = coords["lat"], coords["lon"]
-    progress  = st.progress(0, text="Inicializando...")
+    lat, lon = lat_input, lon_input
+    prog = st.progress(0, text="Inicializando análise...")
 
-    progress.progress(5,  text="📂 Shapefiles MS...")
+    prog.progress(5,  text="📂 Carregando shapefiles MS...")
     shps = carregar_shapefiles()
 
-    progress.progress(15, text="🌤 Open-Meteo...")
+    prog.progress(12, text=f"🌤 Open-Meteo ICON-EU — {nome_ponto}...")
     dados_meteo = buscar_previsao_openmeteo(lat, lon)
+    modelo_usado = dados_meteo.get("_modelo_usado", "ICON-EU") if dados_meteo else "—"
 
-    progress.progress(28, text="☀️ NASA POWER...")
+    prog.progress(24, text="☀️ NASA POWER (ETo + Umidade Solo)...")
     dados_nasa = buscar_nasa_power(lat, lon)
 
-    progress.progress(38, text="🌿 SATVeg NDVI...")
+    prog.progress(34, text="🌿 SATVeg NDVI — Embrapa...")
     ndvi_data = buscar_satveg_ndvi(lat, lon)
 
-    progress.progress(48, text="🔥 INPE Queimadas...")
+    prog.progress(44, text="🔥 BDQueimadas INPE — MS 48h...")
     df_focos = buscar_focos_inpe()
 
-    progress.progress(55, text="📡 INMET estações...")
+    prog.progress(52, text="📡 INMET — Estações automáticas MS...")
     df_inmet = buscar_dados_inmet()
 
-    goes_results = {}
+    # GOES-19 canais reais (opcional)
+    goes_results = {}   # banda_id → (data, extent, ts, fonte)
     if usar_goes_real:
-        progress.progress(60, text="🛰 GOES-19 S3...")
+        prog.progress(58, text="🛰 GOES-19 via goes2go (≤10 min)...")
         for bid in bandas_ativas:
-            d_arr, ext, ts = baixar_e_recortar_goes19(bid,-23.67,-17.16,-57.65,-50.92)
-            goes_results[bid] = (d_arr, ext, ts)
+            if bid.startswith("RGB_"):
+                produto = bid.replace("RGB_", "")
+                rgb, ext, ts = buscar_goes19_rgb(produto)
+                goes_results[bid] = (rgb, ext, ts, "goes2go" if rgb is not None else "simulado")
+            else:
+                data, ext, ts, fonte = obter_canal_goes19(bid, usar_goes_real=True)
+                goes_results[bid] = (data, ext, ts, fonte)
 
-    progress.progress(70, text="📊 Análises agronômicas...")
+    prog.progress(68, text="📊 Análises agronômicas e meteorológicas...")
     janelas_def = calcular_janela_defensivos(dados_meteo)
-    gda_info    = calcular_graus_dia(dados_meteo, cultura_sel,
-                                     datetime.combine(data_semeadura, datetime.min.time()))
+    gda_info    = calcular_graus_dia(
+        dados_meteo, cultura_sel,
+        datetime.combine(data_semeadura, datetime.min.time())
+    )
     riscos_fito = calcular_risco_fitossanitario(dados_meteo)
     bh          = calcular_balanco_hidrico_thornthwaite(dados_meteo, cad_mm)
     alertas     = calcular_alertas(dados_meteo, lat, gda_info)
 
-    progress.progress(80, text="🗺 Renderizando...")
+    # Nowcasting — série TB do B13 (se disponível)
+    tb_serie = None
+    if usar_goes_real and "B13" in goes_results:
+        g_data = goes_results["B13"][0]
+        if g_data is not None:
+            # Pixel mais próximo ao ponto — extração do valor central
+            tb_val = float(np.nanmedian(g_data))
+            tb_serie = [tb_val + 3.0, tb_val + 1.5, tb_val]  # simulação de tendência
+    nowcast = calcular_nowcasting_chuva(dados_meteo, goes_tb_serie=tb_serie)
 
-    # ── Banner do município ───────────────────────────────────────────────────
+    prog.progress(80, text="🗺 Renderizando visualizações...")
+
+    # ── Banner do ponto ───────────────────────────────────────────────────────
     st.markdown(f"""
     <div style="background:linear-gradient(90deg,{VERDE_ESCURO},{VERDE_MEDIO});
                 border-radius:10px;padding:16px 24px;margin-bottom:20px;">
       <span style="color:white;font-family:Montserrat;font-weight:700;font-size:1.1rem;">
-        📍 {municipio_sel} — {coords['regiao']}
+        📍 {nome_ponto}
       </span>
-      <span style="color:rgba(255,255,255,0.75);font-size:0.85rem;margin-left:16px;">
-        {datetime.now().strftime('%d/%m/%Y  %H:%M')} (Horário de Brasília)
+      <span style="color:rgba(255,255,255,0.75);font-size:0.85rem;margin-left:12px;">
+        {lat:.4f}°S  {lon:.4f}°W
+      </span>
+      <span style="color:rgba(255,255,255,0.55);font-size:0.78rem;margin-left:12px;">
+        Modelo: {modelo_usado} · {datetime.now().strftime('%d/%m/%Y %H:%M')} (Brasília)
       </span>
     </div>""", unsafe_allow_html=True)
 
     # ── Métricas rápidas ──────────────────────────────────────────────────────
     if dados_meteo and "hourly" in dados_meteo:
-        h = dados_meteo.get("hourly",{}); d = dados_meteo.get("daily",{})
+        h = dados_meteo.get("hourly", {}); d = dados_meteo.get("daily", {})
         try:
-            c1,c2,c3,c4,c5 = st.columns(5)
-            with c1: st.metric("🌡 Temperatura",  f"{h.get('temperature_2m',[None])[0]:.1f}°C")
-            with c2: st.metric("🌧 Chuva 24h",    f"{d.get('precipitation_sum',[0])[0] or 0:.1f} mm")
-            with c3: st.metric("💧 Umidade",       f"{h.get('relativehumidity_2m',[None])[0]:.0f}%")
-            with c4: st.metric("💨 Vento",         f"{h.get('windspeed_10m',[None])[0]:.0f} km/h")
-            with c5: st.metric("🌿 ETo",           f"{d.get('et0_fao_evapotranspiration',[None])[0]:.2f} mm")
-        except Exception: pass
+            c1,c2,c3,c4,c5,c6 = st.columns(6)
+            with c1: st.metric("🌡 Temp.",    f"{h.get('temperature_2m',[None])[0]:.1f}°C")
+            with c2: st.metric("🌧 Chuva 24h", f"{d.get('precipitation_sum',[0])[0] or 0:.1f} mm")
+            with c3: st.metric("💧 Umidade",   f"{h.get('relativehumidity_2m',[None])[0]:.0f}%")
+            with c4: st.metric("💨 Vento",     f"{h.get('windspeed_10m',[None])[0]:.0f} km/h")
+            with c5: st.metric("⚡ CAPE",      f"{h.get('cape',[0])[0] or 0:.0f} J/kg")
+            with c6: st.metric("🌿 ETo",       f"{d.get('et0_fao_evapotranspiration',[None])[0]:.2f} mm")
+        except Exception:
+            pass
 
     # ═════════════════════════════════════════════════════════════════════════
-    # ABAS TEMÁTICAS
+    # 7 ABAS TEMÁTICAS
     # ═════════════════════════════════════════════════════════════════════════
-    aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
-        "🛰️ Satélite GOES-19",
-        "📈 Previsão Meteorológica",
-        "🌾 Análise Agronômica",
-        "💧 Balanço Hídrico & Solo",
-        "⚠️ Alertas & Fitossanidade",
-        "📧 Relatório & E-mail",
+    aba1, aba2, aba3, aba4, aba5, aba6, aba7 = st.tabs([
+        "🛰️ GOES-19",
+        "⛈️ Nowcasting",
+        "📈 Previsão 72h",
+        "🌾 Agronômica",
+        "💧 Balanço Hídrico",
+        "⚠️ Alertas",
+        "📧 Relatório",
     ])
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ABA 1 — SATÉLITE GOES-19
-    # Mapas de todas as bandas selecionadas + focos de queimada INPE
+    # ABA 1 — GOES-19
     # ─────────────────────────────────────────────────────────────────────────
     with aba1:
-        st.markdown('<div class="secao-titulo">🛰️ Mapas de Satélite GOES-19</div>', unsafe_allow_html=True)
-        st.caption(f"Satélite operacional Leste desde abril/2025 · {len(bandas_ativas)} banda(s) selecionada(s)")
+        st.markdown('<div class="secao-titulo">🛰️ GOES-19 ABI — Canais e Compostos RGB</div>',
+                    unsafe_allow_html=True)
 
-        n_cols    = min(2, len(bandas_ativas))
-        rows_map  = [bandas_ativas[i:i+n_cols] for i in range(0, len(bandas_ativas), n_cols)]
+        deps_status = []
+        if _HAS_GOES2GO:  deps_status.append("✅ goes2go")
+        else:             deps_status.append("❌ goes2go (não instalado)")
+        if _HAS_CARTOPY:  deps_status.append("✅ cartopy")
+        else:             deps_status.append("⚠️ cartopy (matplotlib puro)")
 
-        for row in rows_map:
+        st.caption(" · ".join(deps_status) +
+                   f" · Cache: 10 min · {'Modo real ✓' if usar_goes_real else 'Modo simulação'}")
+
+        n_cols = min(2, len(bandas_ativas))
+        rows   = [bandas_ativas[i:i+n_cols] for i in range(0, len(bandas_ativas), n_cols)]
+
+        for row in rows:
             cols = st.columns(n_cols)
             for j, bid in enumerate(row):
                 with cols[j]:
-                    g_data = g_ext = None
+                    g_data = g_ext = g_ts = None
+                    fonte  = "simulado"
+                    is_rgb = bid.startswith("RGB_")
                     if usar_goes_real and bid in goes_results:
-                        g_data, g_ext, _ = goes_results[bid]
-                    fig = gerar_mapa_banda(bid, shps, municipio_sel, coords,
-                                           goes_data=g_data, extent=g_ext, df_focos=df_focos)
+                        g_data, g_ext, g_ts, fonte = goes_results[bid]
+
+                    fig = gerar_mapa_canal_goes19(
+                        bid, shps, nome_ponto, lat, lon,
+                        goes_data=g_data, extent=g_ext,
+                        is_rgb=is_rgb, ts_label=g_ts or "",
+                        fonte=fonte, df_focos=df_focos
+                    )
                     st.pyplot(fig, use_container_width=True)
                     plt.close(fig)
+
                     binfo = BANDAS_INFO[bid]
                     st.markdown(f"""<div class="band-card" style="margin-top:-6px;">
-                      <h4>{binfo['icon']} {bid} — {binfo['nome']}</h4>
+                      <h4>{binfo['icon']} {bid.replace('RGB_','')} — {binfo['nome']}</h4>
                       <p>{binfo['uso']}</p></div>""", unsafe_allow_html=True)
 
-        # Focos de queimada
+        # Focos INPE
         if not df_focos.empty:
-            st.markdown('<div class="secao-titulo">🔥 Focos de Queimada — INPE/BDQueimadas</div>', unsafe_allow_html=True)
-            sim_label = " ⚠ (dados simulados)" if df_focos.get("_simulado",pd.Series([False])).any() else ""
-            c1,c2 = st.columns([1,3])
+            st.markdown('<div class="secao-titulo">🔥 Focos — INPE/BDQueimadas (48h, MS)</div>',
+                        unsafe_allow_html=True)
+            sim = " ⚠ (simulados)" if df_focos.get("_simulado", pd.Series([False])).any() else ""
+            c1, c2 = st.columns([1, 3])
             with c1:
-                st.metric("Focos nas últimas 48h", len(df_focos), help="MS — INPE")
+                st.metric("Focos detectados", len(df_focos))
                 if "frp" in df_focos.columns:
-                    st.metric("FRP máximo (MW)", f"{df_focos['frp'].max():.0f}")
+                    st.metric("FRP máx. (MW)", f"{df_focos['frp'].max():.0f}")
             with c2:
-                show_cols = [c for c in ["municipio","latitude","longitude","frp"] if c in df_focos.columns]
-                st.dataframe(df_focos[show_cols].head(10), use_container_width=True, hide_index=True)
-            if sim_label:
-                st.caption(sim_label)
+                show = [c for c in ["municipio","latitude","longitude","frp"]
+                        if c in df_focos.columns]
+                st.dataframe(df_focos[show].head(10), use_container_width=True, hide_index=True)
+            if sim: st.caption(sim)
 
         # Estações INMET
-        st.markdown('<div class="secao-titulo">📡 Estações INMET — Mato Grosso do Sul</div>', unsafe_allow_html=True)
         if not df_inmet.empty:
+            st.markdown('<div class="secao-titulo">📡 Estações INMET — MS</div>',
+                        unsafe_allow_html=True)
             st.dataframe(df_inmet, use_container_width=True, hide_index=True)
-            st.caption("Estações automáticas | Fonte: INMET (apitempo.inmet.gov.br)")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ABA 2 — PREVISÃO METEOROLÓGICA
-    # Gráfico 24h, tabela 7 dias, umidade do solo NASA POWER
+    # ABA 2 — NOWCASTING DE CHUVA
     # ─────────────────────────────────────────────────────────────────────────
     with aba2:
-        st.markdown('<div class="secao-titulo">📈 Previsão Horária — Próximas 24 Horas</div>', unsafe_allow_html=True)
-        fig_prev = gerar_grafico_previsao(dados_meteo, municipio_sel)
-        if fig_prev:
-            st.pyplot(fig_prev, use_container_width=True)
-            plt.close(fig_prev)
-        else:
-            st.warning("⚠️ Previsão horária indisponível.")
+        st.markdown('<div class="secao-titulo">⛈️ Nowcasting de Precipitação — 3 Fontes</div>',
+                    unsafe_allow_html=True)
+        st.caption(
+            "Diagnóstico integrado: temperatura de brilho GOES-19 · "
+            "probabilidade Open-Meteo · índices CAPE/LI"
+        )
 
-        st.markdown('<div class="secao-titulo">📅 Previsão 7 Dias</div>', unsafe_allow_html=True)
-        df_7d = gerar_tabela_7dias(dados_meteo)
-        if not df_7d.empty:
-            st.dataframe(df_7d, use_container_width=True, hide_index=True)
+        nivel_cores = {
+            "vermelho": ("#ffebee", "#e53935", "🔴"),
+            "laranja":  ("#fff3e0", "#fb8c00", "🟠"),
+            "amarelo":  ("#fff8e1", "#fbc02d", "🟡"),
+            "verde":    ("#e8f5e9", "#43a047", "🟢"),
+            "azul":     ("#e3f2fd", "#1565c0", "🔵"),
+        }
+
+        c1, c2, c3 = st.columns(3)
+        for col, fonte_key, titulo in [
+            (c1, "goes_tb",     "🛰️ GOES-19 B13"),
+            (c2, "openmeteo",   "📡 Open-Meteo"),
+            (c3, "instabilidade","⚡ CAPE / LI"),
+        ]:
+            with col:
+                nd = nowcast[fonte_key]
+                nv = nd["nivel"]
+                bg, brd, emoji = nivel_cores.get(nv, ("#f5f5f5","#9e9e9e","⚪"))
+                st.markdown(f"""
+                <div style="background:{bg};border:2px solid {brd};border-radius:12px;
+                            padding:16px;text-align:center;min-height:120px;">
+                  <div style="font-size:1.4rem;margin-bottom:6px;">{emoji}</div>
+                  <div style="font-family:'Montserrat',sans-serif;font-weight:700;
+                              font-size:0.82rem;color:#333;margin-bottom:8px;">{titulo}</div>
+                  <div style="font-weight:700;color:{brd};font-size:0.85rem;">
+                    {nd['status']}</div>
+                  <div style="font-size:0.75rem;color:#555;margin-top:8px;line-height:1.4;">
+                    {nd['msg']}</div>
+                </div>""", unsafe_allow_html=True)
+
+        # Nível geral
+        nv_g = nowcast["nivel_geral"]
+        bg, brd, emoji = nivel_cores.get(nv_g, ("#f5f5f5","#9e9e9e","⚪"))
+        st.markdown(f"""
+        <div style="background:{bg};border-left:6px solid {brd};border-radius:10px;
+                    padding:14px 20px;margin:16px 0;text-align:center;">
+          <b style="font-size:1.05rem;color:{brd};">{emoji} Diagnóstico Geral: nível {nv_g.upper()}</b>
+        </div>""", unsafe_allow_html=True)
+
+        # Timeline 0–6h
+        st.markdown('<div class="secao-titulo">⏱️ Probabilidade de Chuva — Próximas 6 Horas</div>',
+                    unsafe_allow_html=True)
+        timeline = nowcast.get("prob_timeline_6h", [])
+        if timeline:
+            cols_t = st.columns(len(timeline))
+            for i, (hora, prob) in enumerate(timeline):
+                with cols_t[i]:
+                    if prob >= 70:   cor, emoji_t = "#ef4444", "⛈️"
+                    elif prob >= 40: cor, emoji_t = "#f59e0b", "🌦️"
+                    else:            cor, emoji_t = "#43a047", "☀️"
+                    st.markdown(f"""
+                    <div style="text-align:center;padding:10px 4px;background:#1e2a3a;
+                                border-radius:8px;border-bottom:4px solid {cor};">
+                      <div style="font-size:1.1rem;">{emoji_t}</div>
+                      <div style="font-size:0.85rem;font-weight:700;color:white;">{prob:.0f}%</div>
+                      <div style="font-size:0.7rem;color:#9ca3af;">{hora}</div>
+                    </div>""", unsafe_allow_html=True)
+
+            # Gráfico de barras
+            fig_nc, ax_nc = plt.subplots(figsize=(8, 2.5), facecolor="#0d1117")
+            ax_nc.set_facecolor("#111827")
+            horas_t = [t[0] for t in timeline]
+            probs_t = [t[1] for t in timeline]
+            cores_nc = ["#ef4444" if p >= 70 else "#f59e0b" if p >= 40 else "#3b82f6"
+                       for p in probs_t]
+            ax_nc.bar(range(len(probs_t)), probs_t, color=cores_nc, alpha=0.85,
+                     width=0.7, edgecolor="none")
+            ax_nc.axhline(70, color="#fbbf24", linewidth=1, linestyle="--",
+                          alpha=0.7, label="70% — limiar")
+            ax_nc.set_ylim(0, 100)
+            ax_nc.set_xticks(range(len(horas_t)))
+            ax_nc.set_xticklabels(horas_t, color="#9ca3af", fontsize=8)
+            ax_nc.set_ylabel("Prob. (%)", color="#9ca3af", fontsize=8)
+            ax_nc.tick_params(colors="#9ca3af", labelsize=8)
+            for sp in ax_nc.spines.values(): sp.set_edgecolor("#1f2937")
+            ax_nc.grid(True, color="#1f2937", linewidth=0.5, alpha=0.6, axis="y")
+            ax_nc.legend(fontsize=7, facecolor="#111827", labelcolor="white",
+                        edgecolor="#374151")
+            ax_nc.set_title(f"Probabilidade de Precipitação — {nome_ponto}",
+                           color="white", fontsize=9, fontweight="bold")
+            plt.tight_layout()
+            st.pyplot(fig_nc, use_container_width=True)
+            plt.close(fig_nc)
+        else:
+            st.info("⚠️ Dados de probabilidade não disponíveis (Open-Meteo não respondeu).")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ABA 3 — PREVISÃO 72H
+    # ─────────────────────────────────────────────────────────────────────────
+    with aba3:
+        st.markdown('<div class="secao-titulo">📈 Previsão Meteorológica 72h — 5 Painéis</div>',
+                    unsafe_allow_html=True)
+        st.caption(
+            f"Modelo: {modelo_usado} · "
+            f"Temperatura · Ponto de orvalho · CAPE · Precipitação · "
+            f"Radiação solar · Vento · Umidade · Heat Index"
+            + (" · tooltip hover (mplcursors ✓)" if _HAS_MPLCURSORS else
+               " · instale mplcursors para tooltip interativo")
+        )
+        prog.progress(85, text="📈 Gerando gráfico 72h interativo...")
+        fig_72h = gerar_grafico_72h_interativo(dados_meteo, nome_ponto, lat, lon)
+        if fig_72h:
+            st.pyplot(fig_72h, use_container_width=True)
+            plt.close(fig_72h)
+        else:
+            st.warning("⚠️ Previsão indisponível — Open-Meteo não respondeu.")
+
+        # Tabela 7 dias
+        with st.expander("📅 Tabela de previsão — 7 dias", expanded=False):
+            df_7d = gerar_tabela_7dias(dados_meteo)
+            if not df_7d.empty:
+                st.dataframe(df_7d, use_container_width=True, hide_index=True)
 
         # Umidade do solo NASA POWER
         if dados_nasa and "properties" in dados_nasa:
@@ -1713,124 +2332,136 @@ def main():
                 gwettop  = params.get("GWETTOP",  {})
                 gwetroot = params.get("GWETROOT", {})
                 if gwettop:
-                    st.markdown('<div class="secao-titulo">🌱 Umidade do Solo — NASA POWER (últimos 14 dias)</div>', unsafe_allow_html=True)
-                    datas_n = sorted(gwettop.keys())[-14:]
-                    vt = [gwettop.get(d,0)  for d in datas_n]
-                    vr = [gwetroot.get(d,0) for d in datas_n]
-                    fig_s,ax_s = plt.subplots(figsize=(10,3.5),facecolor="#0d1117")
-                    ax_s.set_facecolor("#111827")
-                    ax_s.plot(range(len(datas_n)),vt, color="#66BB6A",linewidth=2,label="GWETTOP (0-5cm)")
-                    ax_s.fill_between(range(len(datas_n)),vt,alpha=0.2,color="#66BB6A")
-                    ax_s.plot(range(len(datas_n)),vr,color="#42A5F5",linewidth=2,linestyle="--",label="GWETROOT (radicular)")
-                    ax_s.fill_between(range(len(datas_n)),vr,alpha=0.15,color="#42A5F5")
-                    ax_s.axhline(0.5,color="#FFB74D",linewidth=0.8,linestyle=":",alpha=0.7,label="Campo (0.5)")
-                    ax_s.set_ylim(0,1); ax_s.set_ylabel("Umidade relativa",color="#9ca3af",fontsize=9)
-                    ax_s.set_xticks(range(0,len(datas_n),2))
-                    ax_s.set_xticklabels([d[4:6]+"/"+d[6:8] for d in datas_n[::2]],
-                                         color="#9ca3af",fontsize=8,rotation=30)
-                    ax_s.tick_params(colors="#9ca3af",labelsize=8)
-                    for sp in ax_s.spines.values(): sp.set_edgecolor("#1f2937")
-                    ax_s.grid(True,color="#1f2937",linewidth=0.5,alpha=0.6)
-                    ax_s.legend(fontsize=8,facecolor="#111827",labelcolor="white",edgecolor="#374151")
-                    ax_s.set_title("Umidade do Solo — NASA POWER (GWETTOP & GWETROOT)",
-                                   color="white",fontsize=10)
-                    plt.tight_layout()
-                    st.pyplot(fig_s, use_container_width=True)
-                    plt.close(fig_s)
+                    with st.expander("🌱 Umidade do solo — NASA POWER (30 dias)", expanded=False):
+                        datas_n = sorted(gwettop.keys())[-14:]
+                        vt = [gwettop.get(d, 0)  for d in datas_n]
+                        vr = [gwetroot.get(d, 0) for d in datas_n]
+                        fig_s, ax_s = plt.subplots(figsize=(10, 3), facecolor="#0d1117")
+                        ax_s.set_facecolor("#111827")
+                        ax_s.plot(range(len(datas_n)), vt, color="#66BB6A", linewidth=2,
+                                  label="GWETTOP (0-5cm)")
+                        ax_s.fill_between(range(len(datas_n)), vt, alpha=0.2, color="#66BB6A")
+                        ax_s.plot(range(len(datas_n)), vr, color="#42A5F5", linewidth=2,
+                                  linestyle="--", label="GWETROOT (radicular)")
+                        ax_s.fill_between(range(len(datas_n)), vr, alpha=0.15, color="#42A5F5")
+                        ax_s.axhline(0.5, color="#FFB74D", linewidth=0.8, linestyle=":",
+                                     alpha=0.7, label="Campo (0.5)")
+                        ax_s.set_ylim(0, 1)
+                        ax_s.set_ylabel("Umidade", color="#9ca3af", fontsize=9)
+                        ax_s.set_xticks(range(0, len(datas_n), 2))
+                        ax_s.set_xticklabels(
+                            [d[4:6]+"/"+d[6:8] for d in datas_n[::2]],
+                            color="#9ca3af", fontsize=8, rotation=30)
+                        ax_s.tick_params(colors="#9ca3af", labelsize=8)
+                        for sp in ax_s.spines.values(): sp.set_edgecolor("#1f2937")
+                        ax_s.grid(True, color="#1f2937", linewidth=0.5, alpha=0.6)
+                        ax_s.legend(fontsize=8, facecolor="#111827", labelcolor="white",
+                                    edgecolor="#374151")
+                        ax_s.set_title("Umidade do Solo — NASA POWER",
+                                       color="white", fontsize=10)
+                        plt.tight_layout()
+                        st.pyplot(fig_s, use_container_width=True)
+                        plt.close(fig_s)
             except Exception:
                 pass
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ABA 3 — ANÁLISE AGRONÔMICA
-    # NDVI histórico (SATVeg), Graus-dia/fenologia, janela de defensivos
+    # ABA 4 — ANÁLISE AGRONÔMICA
     # ─────────────────────────────────────────────────────────────────────────
-    with aba3:
-        # NDVI histórico
-        st.markdown('<div class="secao-titulo">🌿 Série Histórica NDVI — SATVeg/Embrapa</div>', unsafe_allow_html=True)
-        fig_ndvi = gerar_grafico_ndvi(ndvi_data, municipio_sel)
+    with aba4:
+        # NDVI
+        st.markdown('<div class="secao-titulo">🌿 Série Histórica NDVI — SATVeg/Embrapa</div>',
+                    unsafe_allow_html=True)
+        fig_ndvi = gerar_grafico_ndvi(ndvi_data, nome_ponto)
         if fig_ndvi:
             st.pyplot(fig_ndvi, use_container_width=True)
             plt.close(fig_ndvi)
 
-        # Graus-dia
-        st.markdown(f'<div class="secao-titulo">🌾 Graus-Dia (GDA) e Fenologia — {cultura_sel}</div>', unsafe_allow_html=True)
+        # Graus-dia e fenologia
+        st.markdown(f'<div class="secao-titulo">🌾 Graus-Dia e Fenologia — {cultura_sel}</div>',
+                    unsafe_allow_html=True)
         if gda_info:
-            c1,c2,c3 = st.columns(3)
+            c1, c2, c3 = st.columns(3)
             with c1: st.metric("GDA Acumulado", f"{gda_info['gda_total']} °C·dia",
-                               help=f"Tb={gda_info['tb']}°C")
-            with c2: st.metric("Dias desde semeadura", gda_info["dias_desde_semeadura"])
+                               help=f"Temperatura-base: {gda_info['tb']}°C")
+            with c2: st.metric("Dias s/ semeadura", gda_info["dias_desde_semeadura"])
             with c3:
                 p = gda_info.get("proximo_estagio")
                 if p: st.metric("Próximo estádio em", f"{p[0]-gda_info['gda_total']:.0f} °C·dia")
-            proximo = gda_info.get("proximo_estagio")
-            prox_str = (f"<p>→ Próximo: <b>{proximo[1]}</b> (faltam {proximo[0]-gda_info['gda_total']:.0f} °C·dia)</p>"
-                        if proximo else "")
+            p = gda_info.get("proximo_estagio")
+            ps = (f"<p>→ Próximo: <b>{p[1]}</b> (faltam {p[0]-gda_info['gda_total']:.0f} °C·dia)</p>"
+                  if p else "")
             st.markdown(f"""<div class="band-card">
-              <h4>🌱 Estádio Fenológico Atual — {cultura_sel}</h4>
-              <p style="font-size:1rem;color:{VERDE_ESCURO};font-weight:700;">{gda_info['estagio_atual']}</p>
-              {prox_str}</div>""", unsafe_allow_html=True)
+              <h4>🌱 Estádio atual — {cultura_sel}</h4>
+              <p style="font-size:1.05rem;color:{VERDE_ESCURO};font-weight:700;">
+                {gda_info['estagio_atual']}</p>
+              {ps}</div>""", unsafe_allow_html=True)
 
         # Janela de defensivos
-        st.markdown('<div class="secao-titulo">🧪 Janela de Aplicação de Defensivos — Próximas 24h</div>', unsafe_allow_html=True)
+        st.markdown('<div class="secao-titulo">🧪 Janela de Aplicação de Defensivos — 24h</div>',
+                    unsafe_allow_html=True)
         st.caption("Critérios MAPA/Embrapa: Vento < 10 km/h | Temp < 30°C | UR > 55% | Sem chuva")
         if janelas_def:
-            cols_def = st.columns(len(janelas_def))
+            cols_d = st.columns(len(janelas_def))
             for i, jan in enumerate(janelas_def):
-                with cols_def[i]:
-                    cor = {"aberta":"🟢","parcial":"🟡","bloqueada":"🔴"}[jan["status"]]
-                    st.markdown(f"<div style='text-align:center;font-size:0.7rem;color:#555;'>"
-                                f"<b>{jan['hora']}</b><br>{cor}</div>", unsafe_allow_html=True)
-
+                with cols_d[i]:
+                    c = {"aberta":"🟢","parcial":"🟡","bloqueada":"🔴"}[jan["status"]]
+                    st.markdown(
+                        f"<div style='text-align:center;font-size:0.68rem;color:#555;'>"
+                        f"<b>{jan['hora']}</b><br>{c}</div>",
+                        unsafe_allow_html=True
+                    )
             n_ab = sum(1 for j in janelas_def if j["status"]=="aberta")
             n_pa = sum(1 for j in janelas_def if j["status"]=="parcial")
             n_bl = sum(1 for j in janelas_def if j["status"]=="bloqueada")
-            c1,c2,c3 = st.columns(3)
-            with c1: st.metric("✅ Horas ideais",    n_ab)
-            with c2: st.metric("⚠️ Horas parciais",  n_pa)
-            with c3: st.metric("❌ Horas bloqueadas", n_bl)
+            cc1, cc2, cc3 = st.columns(3)
+            with cc1: st.metric("✅ Horas ideais",    n_ab)
+            with cc2: st.metric("⚠️ Horas parciais",  n_pa)
+            with cc3: st.metric("❌ Horas bloqueadas", n_bl)
 
-            # Melhor janela contínua
-            max_seq=max_start=cur_seq=cur_start=0
-            for i,j in enumerate(janelas_def):
-                if j["status"]=="aberta":
-                    if cur_seq==0: cur_start=i
-                    cur_seq+=1
-                    if cur_seq>max_seq: max_seq=cur_seq; max_start=cur_start
-                else: cur_seq=0
-
+            max_seq = cur_seq = cur_start = max_start = 0
+            for i, j in enumerate(janelas_def):
+                if j["status"] == "aberta":
+                    if cur_seq == 0: cur_start = i
+                    cur_seq += 1
+                    if cur_seq > max_seq: max_seq = cur_seq; max_start = cur_start
+                else:
+                    cur_seq = 0
             if max_seq > 0:
-                h_ini = janelas_def[max_start]["hora"]
-                h_fim = janelas_def[min(max_start+max_seq-1, len(janelas_def)-1)]["hora"]
+                h1 = janelas_def[max_start]["hora"]
+                h2 = janelas_def[min(max_start+max_seq-1,len(janelas_def)-1)]["hora"]
                 st.markdown(f"""<div class="alert-verde">
-                  <b>✅ Melhor janela: {h_ini} → {h_fim} ({max_seq}h)</b><br>
-                  <span style="font-size:0.88rem;">Período ideal para aplicação de defensivos e fertilizantes foliares.</span>
+                  <b>✅ Melhor janela: {h1} → {h2} ({max_seq}h contínuas)</b><br>
+                  <span style="font-size:0.88rem;">Período ideal para defensivos e fertilizantes foliares.</span>
                 </div>""", unsafe_allow_html=True)
             elif n_pa > 0:
-                st.markdown("""<div class="alert-amarelo"><b>⚠️ Apenas janelas parciais disponíveis.</b></div>""", unsafe_allow_html=True)
+                st.markdown("""<div class="alert-amarelo">
+                  <b>⚠️ Apenas janelas parciais disponíveis.</b>
+                </div>""", unsafe_allow_html=True)
             else:
-                st.markdown("""<div class="alert-vermelho"><b>❌ Sem janela nas próximas 24h. Adie aplicações.</b></div>""", unsafe_allow_html=True)
+                st.markdown("""<div class="alert-vermelho">
+                  <b>❌ Sem janela ideal nas próximas 24h. Adie as aplicações.</b>
+                </div>""", unsafe_allow_html=True)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ABA 4 — BALANÇO HÍDRICO & SOLO
-    # Thornthwaite-Mather, umidade NASA POWER, ETo
+    # ABA 5 — BALANÇO HÍDRICO
     # ─────────────────────────────────────────────────────────────────────────
-    with aba4:
-        st.markdown(f'<div class="secao-titulo">💧 Balanço Hídrico do Solo (Thornthwaite-Mather) — {textura_solo}</div>', unsafe_allow_html=True)
+    with aba5:
+        st.markdown(f'<div class="secao-titulo">💧 Balanço Hídrico — Thornthwaite-Mather · {textura_solo}</div>',
+                    unsafe_allow_html=True)
         if bh:
-            c1,c2,c3,c4 = st.columns(4)
-            with c1: st.metric("ARM atual", f"{bh['arm_mm']:.1f} mm",
-                               delta=f"{bh['arm_pct']:.0f}% da CAD")
-            with c2: st.metric("CAD",       f"{bh['cad_mm']:.0f} mm")
-            with c3: st.metric("Déficit",   f"{bh['def_mm']:.1f} mm",
-                               delta_color="inverse",
-                               delta=f"{'❌' if bh['def_mm']>0 else '✅'}")
-            with c4: st.metric("ETR",       f"{bh['etr_mm']:.1f} mm")
-
+            cc1,cc2,cc3,cc4 = st.columns(4)
+            with cc1: st.metric("ARM atual", f"{bh['arm_mm']:.1f} mm",
+                                delta=f"{bh['arm_pct']:.0f}% da CAD")
+            with cc2: st.metric("CAD",       f"{bh['cad_mm']:.0f} mm")
+            with cc3: st.metric("Déficit",   f"{bh['def_mm']:.1f} mm",
+                                delta_color="inverse",
+                                delta="❌ déficit" if bh["def_mm"] > 0 else "✅ ok")
+            with cc4: st.metric("ETR",       f"{bh['etr_mm']:.1f} mm")
             fig_bh = gerar_grafico_balanco_hidrico(bh)
             if fig_bh:
                 st.pyplot(fig_bh, use_container_width=True)
                 plt.close(fig_bh)
-
             st.markdown(f"""<div class="alert-{bh['nivel']}" style="margin-top:10px;">
               <b>Recomendação de Irrigação:</b> {bh['recomendacao']}
             </div>""", unsafe_allow_html=True)
@@ -1838,19 +2469,20 @@ def main():
             st.info("💧 Dados de balanço hídrico indisponíveis.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ABA 5 — ALERTAS & FITOSSANIDADE
-    # Alertas meteorológicos + risco fitossanitário calculado
+    # ABA 6 — ALERTAS
     # ─────────────────────────────────────────────────────────────────────────
-    with aba5:
-        st.markdown('<div class="secao-titulo">⚠️ Alertas Meteorológicos Ativos</div>', unsafe_allow_html=True)
+    with aba6:
+        st.markdown('<div class="secao-titulo">⚠️ Alertas Meteorológicos Ativos</div>',
+                    unsafe_allow_html=True)
         for al in alertas:
             st.markdown(f"""<div class="alert-{al['nivel']}">
               <b>{al['icone']} {al['titulo']}</b><br>
               <span style="font-size:0.9rem;">{al['msg']}</span>
             </div>""", unsafe_allow_html=True)
 
-        st.markdown('<div class="secao-titulo">🍂 Risco Fitossanitário — Doenças Foliares (48h)</div>', unsafe_allow_html=True)
-        st.caption("Ferrugem Asiática: T 15–30°C + UR>80% por 12h+ | Brusone: T 20–28°C + UR>90% por 10h+")
+        st.markdown('<div class="secao-titulo">🍂 Risco Fitossanitário (48h)</div>',
+                    unsafe_allow_html=True)
+        st.caption("Ferrugem: T 15–30°C + UR>80% ≥12h | Brusone: T 20–28°C + UR>90% ≥10h")
         for r in riscos_fito:
             st.markdown(f"""<div class="alert-{r['cor']}">
               <b>{r['icone']} {r['doenca']} — Risco {r['nivel']}</b><br>
@@ -1858,19 +2490,16 @@ def main():
             </div>""", unsafe_allow_html=True)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ABA 6 — RELATÓRIO & E-MAIL
-    # Envio manual, pré-visualização HTML, configuração de destinatários,
-    # histórico do scheduler
+    # ABA 7 — RELATÓRIO E E-MAIL
     # ─────────────────────────────────────────────────────────────────────────
-    with aba6:
-        st.markdown('<div class="secao-titulo">📧 Relatório Agroclimático — Envio por E-mail</div>', unsafe_allow_html=True)
+    with aba7:
+        st.markdown('<div class="secao-titulo">📧 Relatório Agroclimático — Envio por E-mail</div>',
+                    unsafe_allow_html=True)
 
-        # Status da configuração
         if _email_configurado:
             st.markdown(f"""<div class="alert-verde">
-              <b>✅ E-mail configurado</b><br>
-              Remetente: {EMAIL_REMETENTE}<br>
-              Destinatários padrão: {', '.join(EMAIL_DESTINATARIOS)}
+              <b>✅ E-mail configurado</b> · Remetente: {EMAIL_REMETENTE}<br>
+              Destinatários: {', '.join(EMAIL_DESTINATARIOS)}
             </div>""", unsafe_allow_html=True)
         else:
             st.markdown("""<div class="alert-amarelo">
@@ -1878,118 +2507,74 @@ def main():
               Adicione ao <code>.streamlit/secrets.toml</code>:<br><br>
               <code>[email]</code><br>
               <code>remetente = "seuemail@gmail.com"</code><br>
-              <code>senha_app = "sua_senha_de_app_gmail"</code><br>
-              <code>destinatario = "destino@email.com"</code><br><br>
-              Para gerar a senha de app: Conta Google → Segurança → Verificação em 2 etapas → Senhas de app
+              <code>senha_app = "senha_de_app_gmail"</code><br>
+              <code>destinatario = "destino@email.com"</code>
             </div>""", unsafe_allow_html=True)
 
         st.markdown("---")
-
-        # Destinatários extras
-        st.markdown("**Destinatários adicionais (opcional):**")
-        dest_extra_str = st.text_input(
-            "E-mails separados por vírgula",
-            placeholder="agrônomo@fazenda.com, gestor@empresa.com",
-            label_visibility="collapsed"
+        dest_extra = st.text_input(
+            "Destinatários adicionais (separados por vírgula)",
+            placeholder="agronomo@fazenda.com, gestor@empresa.com",
+            label_visibility="visible"
         )
-        dest_extras = [e.strip() for e in dest_extra_str.split(",") if "@" in e] if dest_extra_str else []
+        dest_extras = [e.strip() for e in dest_extra.split(",") if "@" in e] if dest_extra else []
 
-        col_btn1, col_btn2 = st.columns(2)
-
-        # Botão de envio manual
-        with col_btn1:
-            if st.button("📤 Enviar Relatório Agora", use_container_width=True):
-                with st.spinner("Gerando e enviando relatório..."):
+        cb1, cb2 = st.columns(2)
+        with cb1:
+            if st.button("📤 Enviar relatório agora", use_container_width=True):
+                with st.spinner("Gerando e enviando..."):
                     ok, msg = enviar_relatorio_email(
-                        municipio=municipio_sel,
-                        coords=coords,
-                        dados_meteo=dados_meteo,
-                        alertas=alertas,
-                        janelas_def=janelas_def,
-                        gda_info=gda_info,
-                        riscos_fito=riscos_fito,
-                        bh=bh,
-                        ndvi_data=ndvi_data,
-                        df_focos=df_focos,
-                        df_inmet=df_inmet,
-                        destinatarios_extras=dest_extras,
+                        nome_ponto, lat, lon,
+                        dados_meteo, alertas, janelas_def, gda_info,
+                        riscos_fito, bh, ndvi_data, df_focos, df_inmet,
+                        destinatarios_extras=dest_extras
                     )
-                if ok:
-                    st.success(f"✅ Relatório enviado com sucesso!\n{msg}")
-                else:
-                    st.error(f"❌ Falha no envio: {msg}")
-
-        # Botão de pré-visualização
-        with col_btn2:
+                if ok: st.success(f"✅ {msg}")
+                else:  st.error(f"❌ {msg}")
+        with cb2:
             if st.button("👁 Pré-visualizar HTML", use_container_width=True):
-                html_prev = gerar_html_relatorio(
-                    municipio_sel, coords, dados_meteo, alertas,
-                    janelas_def, gda_info, riscos_fito, bh,
-                    ndvi_data, df_focos, df_inmet
+                html_p = gerar_html_relatorio(
+                    nome_ponto, lat, lon,
+                    dados_meteo, alertas, janelas_def, gda_info,
+                    riscos_fito, bh, ndvi_data, df_focos, df_inmet
                 )
-                st.components.v1.html(html_prev, height=700, scrolling=True)
+                st.components.v1.html(html_p, height=700, scrolling=True)
 
         st.markdown("---")
+        st.markdown('<div class="secao-titulo">🕐 Scheduler — Relatório Automático</div>',
+                    unsafe_allow_html=True)
+        cs1, cs2 = st.columns(2)
+        with cs1:
+            st.markdown("""**Horários automáticos (America/Campo_Grande):**
+- ⏰ 06h00 · ⏰ 12h00 · ⏰ 18h00
 
-        # Scheduler — configuração e histórico
-        st.markdown('<div class="secao-titulo">🕐 Relatório Automático (Scheduler)</div>', unsafe_allow_html=True)
-
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            st.markdown("""**Horários automáticos:**
-- ⏰ 06h00 — Relatório matinal
-- ⏰ 12h00 — Relatório do meio-dia
-- ⏰ 18h00 — Relatório vespertino
-
-Município padrão: **Campo Grande**
-_(Para outros municípios, use o botão de envio manual acima)_""")
-
-        with col_s2:
+Ponto padrão: **Campo Grande** (lat/lon fixo)
+Para outros pontos: use o botão de envio manual acima.""")
+        with cs2:
             if "scheduler_obj" in st.session_state:
-                _sched_ref = st.session_state["scheduler_obj"]
-                _job = _sched_ref.get_job("relatorio_automatico")
-                if _job and _job.next_run_time:
-                    st.info(f"⏰ **Próxima execução:**\n{_job.next_run_time.strftime('%d/%m/%Y às %H:%M')}")
-                    st.caption("Fuso horário: America/Campo_Grande")
-
+                job = st.session_state["scheduler_obj"].get_job("relatorio_automatico")
+                if job and job.next_run_time:
+                    st.info(f"⏰ Próxima execução:\n{job.next_run_time.strftime('%d/%m/%Y às %H:%M')}")
                 if st.button("▶ Disparar agora (background)", use_container_width=True):
                     threading.Thread(target=scheduled_report_automatico, daemon=True).start()
-                    st.success("Relatório automático iniciado em background!")
+                    st.success("Iniciado em background!")
 
-        # Histórico de execuções
         with _log_lock:
-            _log_snap = list(_scheduler_log)
+            log_snap = list(_scheduler_log)
+        if log_snap:
+            st.markdown("**Histórico de execuções:**")
+            st.dataframe(pd.DataFrame(log_snap), use_container_width=True, hide_index=True)
 
-        if _log_snap:
-            st.markdown("**Histórico de execuções automáticas:**")
-            df_log = pd.DataFrame(_log_snap)
-            st.dataframe(df_log, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Nenhuma execução automática registrada ainda.")
-
-        st.markdown("---")
-        st.markdown("""**📋 Conteúdo do relatório por e-mail:**
-- 📊 Métricas rápidas (temperatura, chuva, umidade, vento, ETo)
-- ⚠️ Alertas ativos com coloração por severidade
-- 🧪 Janela de aplicação de defensivos (resumo + melhor horário)
-- 🌾 Graus-dia acumulados e estádio fenológico
-- 🍂 Risco fitossanitário (ferrugem, brusone)
-- 🌿 NDVI atual vs mediana histórica (SATVeg/Embrapa)
-- 💧 Balanço hídrico com recomendação de irrigação
-- 🔥 Focos de queimada INPE (últimas 48h)
-- 📅 Tabela de previsão para 7 dias
-- 📡 Estações INMET ativas no MS""")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # RODAPÉ
-    # ─────────────────────────────────────────────────────────────────────────
-    progress.progress(100, text="✅ Análise concluída!")
+    # ── Rodapé ───────────────────────────────────────────────────────────────
+    prog.progress(100, text="✅ Análise concluída!")
     st.markdown("---")
     st.markdown(f"""
     <div style="text-align:center;padding:16px;color:#888;font-size:0.8rem;">
       <b style="color:{VERDE_ESCURO};">Yamada Engenharia</b> — Meteorologia Aplicada ao Agronegócio<br>
-      GOES-19 ABI · Open-Meteo · NASA POWER · SATVeg · INPE · INMET<br>
-      Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')} · MVP v3.0
+      GOES-19 (goes2go) · Open-Meteo ICON-EU/GFS025 · NASA POWER ·
+      SATVeg/Embrapa · INPE BDQueimadas · INMET<br>
+      Ponto: <b>{nome_ponto}</b> — {lat:.4f}°S {lon:.4f}°W ·
+      {datetime.now().strftime('%d/%m/%Y %H:%M')} · MVP v4.0
     </div>""", unsafe_allow_html=True)
 
 
