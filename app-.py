@@ -154,7 +154,7 @@ except Exception:
     EMAIL_REMETENTE = ""; EMAIL_DESTINATARIOS = []; _email_ok = False
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DADOS DE REFERÊNCIA GEOGRÁFICA (apenas para marcadores no mapa)
+# DADOS DE REFERÊNCIA GEOGRÁFICA
 # ─────────────────────────────────────────────────────────────────────────────
 CIDADES_MAPA = {
     "Campo Grande":    (-20.4428, -54.6460),
@@ -233,7 +233,6 @@ WCODE_MAP = {
     99:"⛈ Tempestade c/ granizo",
 }
 
-# CAD padrão fixo (solo médio/franco — referência EMBRAPA para MS)
 CAD_PADRAO_MM = 65.0
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,23 +259,25 @@ if "scheduler_started" not in st.session_state:
 # INICIALIZAÇÃO DO SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
 _DEFAULTS = {
-    "lat_sel":    -20.4428,
-    "lon_sel":    -54.6460,
-    "analisado":  False,
-    "dados_raw":  None,
-    "df_main":    None,
-    "ensemble_raw": {},
-    "df_ic_cache":  {},
-    "dados_nasa": None,
-    "df_focos":   None,
-    "janelas_df": None,
-    "riscos":     None,
-    "alertas":    None,
-    "bh":         None,
-    "modelo_used": "best_match",
-    "dias_used":   7,
-    "lat_used":    None,
-    "lon_used":    None,
+    "lat_sel":           -20.4428,
+    "lon_sel":           -54.6460,
+    "analisado":         False,
+    "dados_raw":         None,
+    "df_main":           None,
+    "ensemble_raw":      {},
+    "df_ic_cache":       {},
+    "dados_nasa":        None,
+    "df_focos":          None,
+    "janelas_df":        None,
+    "riscos":            None,
+    "alertas":           None,
+    "bh":                None,
+    "modelo_used":       "best_match",
+    "dias_used":         7,
+    "lat_used":          None,
+    "lon_used":          None,
+    # ── NOVO: chave de guarda contra requisições duplicadas ──
+    "dados_buscados_key": None,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -358,7 +359,6 @@ def buscar_focos_inpe() -> pd.DataFrame:
             return pd.DataFrame(data)
         return pd.DataFrame()
     except Exception:
-        # Dados simulados para demonstração quando API indisponível
         np.random.seed(42)
         n = 8
         return pd.DataFrame({
@@ -386,11 +386,6 @@ def openmeteo_para_df(dados: dict) -> pd.DataFrame:
 
 
 def calcular_intervalo_confianca(ensemble: dict, var: str) -> pd.DataFrame:
-    """
-    Calcula spread entre modelos como proxy de incerteza da previsão.
-    IC 68% ≈ ±1σ | IC 95% ≈ ±2σ
-    Metodologia: Goswami et al. (2010); Buizza et al. (2005).
-    """
     series = []
     for mod, dados in ensemble.items():
         if "hourly" in dados and var in dados["hourly"]:
@@ -420,10 +415,6 @@ def calcular_intervalo_confianca(ensemble: dict, var: str) -> pd.DataFrame:
 
 
 def calcular_janelas_defensivos(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Janela de aplicação de defensivos — Critérios MAPA/Embrapa (Portaria 371/2020):
-      Vento < 10 km/h | Temperatura < 30°C | UR > 55% | Precipitação = 0
-    """
     if df.empty:
         return pd.DataFrame()
     df2 = df.copy().head(24)
@@ -459,17 +450,6 @@ def calcular_janelas_defensivos(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calcular_risco_fitossanitario(df: pd.DataFrame) -> dict:
-    """
-    Risco de doenças foliares com base em horas consecutivas de condições favoráveis (48h).
-
-    Ferrugem Asiática (Phakopsora pachyrhizi):
-      T 15–30°C + UR >80% por ≥12h consecutivas
-      (Del Ponte et al. 2006; Yorinori et al. 2005)
-
-    Brusone (Magnaporthe oryzae):
-      T 20–28°C + UR >90% por ≥10h consecutivas
-      (Filippi & Prabhu 2001)
-    """
     if df.empty:
         return {
             "ferrugem": {"doenca": "Ferrugem Asiática (Soja)", "horas_consecutivas": 0,
@@ -486,7 +466,6 @@ def calcular_risco_fitossanitario(df: pd.DataFrame) -> dict:
     umid = df48.get("relativehumidity_2m", pd.Series(70, index=df48.index))
     riscos = {}
 
-    # ── Ferrugem Asiática ──
     cond_fer = (temp >= 15) & (temp <= 30) & (umid > 80)
     max_seq_fer = cur_fer = 0
     for v in cond_fer:
@@ -505,7 +484,6 @@ def calcular_risco_fitossanitario(df: pd.DataFrame) -> dict:
         "emoji": "🍂", "referencia": "Del Ponte et al. (2006); Yorinori et al. (2005)",
     }
 
-    # ── Brusone ──
     cond_bru = (temp >= 20) & (temp <= 28) & (umid > 90)
     max_seq_bru = cur_bru = 0
     for v in cond_bru:
@@ -527,7 +505,6 @@ def calcular_risco_fitossanitario(df: pd.DataFrame) -> dict:
 
 
 def calcular_alertas_meteo(df: pd.DataFrame, lat: float) -> list:
-    """Gera alertas meteorológicos automáticos para os próximos 7 dias."""
     alertas = []
     if df.empty:
         return [{"nivel":"verde","icone":"✅",
@@ -588,11 +565,6 @@ def calcular_alertas_meteo(df: pd.DataFrame, lat: float) -> list:
 
 
 def calcular_balanco_hidrico(df: pd.DataFrame, cad_mm: float = CAD_PADRAO_MM) -> dict:
-    """
-    Balanço hídrico Thornthwaite-Mather simplificado.
-    ETo estimada pelo método de Hargreaves-Samani (1985).
-    CAD padrão = 65mm (solo médio/franco — referência EMBRAPA para o MS).
-    """
     if df.empty:
         return {}
     try:
@@ -649,7 +621,6 @@ def calcular_balanco_hidrico(df: pd.DataFrame, cad_mm: float = CAD_PADRAO_MM) ->
 # FUNÇÕES DE VISUALIZAÇÃO
 # ─────────────────────────────────────────────────────────────────────────────
 def _ax_base(ax):
-    """Aplica estilo escuro padrão a um eixo matplotlib."""
     ax.set_facecolor("#111827")
     ax.tick_params(colors="#9ca3af", labelsize=8)
     for sp in ax.spines.values():
@@ -672,7 +643,6 @@ def fig_variavel_com_ic(df_main: pd.DataFrame, var: str,
     serie = df_main[var].dropna()
     x     = serie.index
 
-    # Faixas de intervalo de confiança
     if df_ic is not None and not df_ic.empty:
         ic_re = df_ic.reindex(x, method="nearest")
         ax.fill_between(x, ic_re["ic95_low"], ic_re["ic95_high"],
@@ -687,7 +657,6 @@ def fig_variavel_com_ic(df_main: pd.DataFrame, var: str,
         ax.plot(x, serie.values, color=cor, linewidth=2.0, label=label, zorder=5)
         ax.fill_between(x, serie.values, alpha=0.10, color=cor)
 
-    # Limiares agronômicos relevantes
     limiares = {
         "temperature_2m":      [(5,  "#60a5fa", "Risco geada (5°C)"),
                                  (30, "#f97316", "Lim. defensivos (30°C)"),
@@ -745,10 +714,6 @@ def fig_multiplas_variaveis(df: pd.DataFrame, vars_list: list) -> Figure:
 
 
 def fig_matriz_alertas(df_main: pd.DataFrame) -> Figure:
-    """
-    Matriz hora × variável para as próximas 24h.
-    Verde = OK | Amarelo = Atenção | Vermelho = Risco/Bloqueado
-    """
     if df_main.empty:
         return None
     df24  = df_main.head(24).copy()
@@ -774,8 +739,8 @@ def fig_matriz_alertas(df_main: pd.DataFrame) -> Figure:
         matriz[i, 1] = 0 if ur > 55 else 2
         matriz[i, 2] = 0 if vt < 10 else (1 if vt < 15 else 2)
         matriz[i, 3] = 0 if pp == 0 else (1 if pp < 2 else 2)
-        matriz[i, 4] = 2 if (15 <= t <= 30 and ur > 80) else 0    # Ferrugem
-        matriz[i, 5] = 2 if (20 <= t <= 28 and ur > 90) else 0    # Brusone
+        matriz[i, 4] = 2 if (15 <= t <= 30 and ur > 80) else 0
+        matriz[i, 5] = 2 if (20 <= t <= 28 and ur > 90) else 0
         ok_cnt = (t < 30) + (ur > 55) + (vt < 10) + (pp == 0)
         matriz[i, 6] = 0 if ok_cnt == 4 else (1 if ok_cnt == 3 else 2)
 
@@ -813,7 +778,6 @@ def fig_matriz_alertas(df_main: pd.DataFrame) -> Figure:
 
 
 def fig_confianca_modelos(ensemble: dict, var: str) -> Figure:
-    """Spread entre modelos com painel de coeficiente de variação (incerteza)."""
     series = {}
     for mod, dados in ensemble.items():
         if "hourly" in dados and var in dados["hourly"]:
@@ -901,7 +865,6 @@ def criar_mapa(lat_sel: float, lon_sel: float) -> folium.Map:
         control=True,
     ).add_to(m)
 
-    # Marcadores de cidades (referência visual apenas)
     for nome, (lat, lon) in CIDADES_MAPA.items():
         folium.CircleMarker(
             location=[lat, lon], radius=5,
@@ -914,7 +877,6 @@ def criar_mapa(lat_sel: float, lon_sel: float) -> folium.Map:
             ),
         ).add_to(m)
 
-    # Ponto de análise atual
     folium.Marker(
         location=[lat_sel, lon_sel],
         popup=f"<b>📌 Ponto de Análise</b><br>Lat: {lat_sel:.4f}<br>Lon: {lon_sel:.4f}",
@@ -1005,7 +967,7 @@ def gerar_html_relatorio(lat, lon, df, alertas, riscos, bh, janelas_list, nome_l
       {bh_html}
       <p style='color:#bbb;font-size:10px;margin-top:28px;border-top:1px solid #eee;padding-top:12px;text-align:center;'>
         Dados: Open-Meteo (GFS/ICON/ERA5) · NASA POWER · INPE<br>
-        CAD padrão 65mm (solo médio/franco, EMBRAPA) · MVP v4.1 · {agora}
+        CAD padrão 65mm (solo médio/franco, EMBRAPA) · MVP v4.2 · {agora}
       </p>
     </div>
   </div>
@@ -1045,7 +1007,7 @@ def main():
       <h1>🌿 Yamada Engenharia</h1>
       <p>Plataforma de Monitoramento Agroclimático — Mato Grosso do Sul</p>
       <p style="font-size:0.75rem;color:rgba(255,255,255,0.5);">
-        Open-Meteo (GFS · ICON · ERA5) · NASA POWER · INPE · v4.1
+        Open-Meteo (GFS · ICON · ERA5) · NASA POWER · INPE · v4.2
       </p>
     </div>
     """, unsafe_allow_html=True)
@@ -1062,7 +1024,6 @@ def main():
         </div>""", unsafe_allow_html=True)
         st.markdown("---")
 
-        # ── Coordenadas manuais ──────────────────────────────────────────────
         st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
                     'font-size:0.88rem;">📍 COORDENADAS DO PONTO</p>',
                     unsafe_allow_html=True)
@@ -1080,7 +1041,6 @@ def main():
             key="lon_input_num",
             help="Longitudes válidas para o MS: -57.8 a -50.8")
 
-        # Detecta alteração manual e invalida análise anterior
         coords_changed = (
             abs(lat_input - st.session_state["lat_sel"]) > 0.0001 or
             abs(lon_input - st.session_state["lon_sel"]) > 0.0001
@@ -1090,7 +1050,6 @@ def main():
             st.session_state["lon_sel"]   = round(lon_input, 4)
             st.session_state["analisado"] = False
 
-        # Indicador do ponto atual
         st.markdown(
             f'<div class="status-ponto">'
             f'<span style="color:#a5d6a7;font-size:0.78rem;">Ponto selecionado</span><br>'
@@ -1102,7 +1061,6 @@ def main():
 
         st.markdown("---")
 
-        # ── Configurações da análise ─────────────────────────────────────────
         st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
                     'font-size:0.88rem;">⚙️ CONFIGURAÇÕES</p>',
                     unsafe_allow_html=True)
@@ -1125,7 +1083,6 @@ def main():
 
         st.markdown("---")
 
-        # ── E-mail ───────────────────────────────────────────────────────────
         st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
                     'font-size:0.88rem;">📧 E-MAIL</p>',
                     unsafe_allow_html=True)
@@ -1135,11 +1092,10 @@ def main():
             st.caption("⚠️ Configure [email] no secrets.toml")
         st.markdown("---")
 
-        # ── Botão principal ──────────────────────────────────────────────────
         botao_analise = st.button("🚀  GERAR ANÁLISE", use_container_width=True)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # MAPA INTERATIVO (renderizado antes do gatilho de análise)
+    # MAPA INTERATIVO
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown('<div class="secao-titulo">🗺️ Selecione o Ponto de Análise no Mapa</div>',
                 unsafe_allow_html=True)
@@ -1154,11 +1110,11 @@ def main():
                          key="mapa_principal")
 
     # Atualiza coordenadas a partir do clique no mapa
+    # IMPORTANTE: apenas atualiza o session_state e para — NÃO busca dados aqui
     if map_out and map_out.get("last_clicked"):
         clk = map_out["last_clicked"]
         lat_c = round(clk["lat"], 4)
         lon_c = round(clk["lng"], 4)
-        # Bounding box MS com margem
         if -24.2 <= lat_c <= -16.8 and -58.2 <= lon_c <= -50.5:
             if (abs(lat_c - st.session_state["lat_sel"]) > 0.001 or
                     abs(lon_c - st.session_state["lon_sel"]) > 0.001):
@@ -1168,16 +1124,80 @@ def main():
                 st.rerun()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # GATILHO DE ANÁLISE
+    # GATILHO DE ANÁLISE — toda a coleta de dados fica AQUI dentro
     # ─────────────────────────────────────────────────────────────────────────
     if botao_analise:
-        st.session_state["analisado"] = True
-        # Salva parâmetros usados para possível re-execução
+        st.session_state["analisado"]   = True
         st.session_state["lat_used"]    = st.session_state["lat_sel"]
         st.session_state["lon_used"]    = st.session_state["lon_sel"]
         st.session_state["modelo_used"] = modelo_sel
         st.session_state["dias_used"]   = dias_prev
 
+        # ── Camada 1: coordenadas arredondadas (evita cache miss por décimos) ──
+        lat_r = round(st.session_state["lat_sel"], 2)
+        lon_r = round(st.session_state["lon_sel"], 2)
+
+        # ── Camada 2: chave de guarda (evita re-fetch para o mesmo ponto) ──
+        fetch_key = (lat_r, lon_r, modelo_sel, dias_prev, calcular_ic)
+
+        if st.session_state.get("dados_buscados_key") != fetch_key:
+            # ── Camada 3: dados buscados UMA ÚNICA VEZ, dentro do botão ──
+            progresso = st.progress(0, text="Inicializando coleta de dados...")
+
+            progresso.progress(10, text=f"🌤 Coletando Open-Meteo ({MODELOS_OPENMETEO[modelo_sel]})...")
+            dados_raw = buscar_openmeteo(lat_r, lon_r, modelo_sel, dias_prev)
+
+            if "_erro" in dados_raw:
+                st.error(f"❌ Erro ao acessar Open-Meteo: {dados_raw['_erro']}")
+                st.session_state["analisado"] = False
+                st.stop()
+
+            df_main = openmeteo_para_df(dados_raw)
+            if df_main.empty:
+                st.error("❌ Nenhum dado retornado pela API. Verifique as coordenadas.")
+                st.session_state["analisado"] = False
+                st.stop()
+
+            progresso.progress(30, text="📊 Calculando ensemble multi-modelo...")
+            ensemble_raw = {}
+            df_ic_cache  = {}
+            if calcular_ic:
+                ensemble_raw = buscar_ensemble_openmeteo(lat_r, lon_r, dias_prev)
+                for v in ["temperature_2m","precipitation","relativehumidity_2m","windspeed_10m"]:
+                    df_ic_cache[v] = calcular_intervalo_confianca(ensemble_raw, v)
+
+            progresso.progress(55, text="☀️ Consultando NASA POWER (solo/radiação)...")
+            dados_nasa = buscar_nasa_power(lat_r, lon_r)
+
+            progresso.progress(70, text="🔥 Consultando INPE Queimadas...")
+            df_focos = buscar_focos_inpe()
+
+            progresso.progress(82, text="📐 Processando análises agronômicas...")
+            janelas_df = calcular_janelas_defensivos(df_main)
+            riscos     = calcular_risco_fitossanitario(df_main)
+            alertas    = calcular_alertas_meteo(df_main, st.session_state["lat_used"])
+            bh         = calcular_balanco_hidrico(df_main, CAD_PADRAO_MM)
+
+            progresso.progress(100, text="✅ Análise concluída!")
+
+            # Persiste tudo no session_state
+            st.session_state["dados_raw"]          = dados_raw
+            st.session_state["df_main"]            = df_main
+            st.session_state["ensemble_raw"]       = ensemble_raw
+            st.session_state["df_ic_cache"]        = df_ic_cache
+            st.session_state["dados_nasa"]         = dados_nasa
+            st.session_state["df_focos"]           = df_focos
+            st.session_state["janelas_df"]         = janelas_df
+            st.session_state["riscos"]             = riscos
+            st.session_state["alertas"]            = alertas
+            st.session_state["bh"]                 = bh
+            st.session_state["dados_buscados_key"] = fetch_key
+
+        # Se a chave já bate, apenas usa o que está no session_state (zero requisições)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Bloco de exibição — apenas lê do session_state, nunca chama APIs
+    # ─────────────────────────────────────────────────────────────────────────
     if not st.session_state["analisado"]:
         st.markdown("""
         <div class="alert-azul" style="margin-top:16px;">
@@ -1190,55 +1210,25 @@ def main():
         </div>""", unsafe_allow_html=True)
         st.stop()
 
-    # Recupera parâmetros fixados no momento do clique em GERAR ANÁLISE
+    # Lê os dados do session_state para o restante da renderização
     lat        = st.session_state.get("lat_used", st.session_state["lat_sel"])
     lon        = st.session_state.get("lon_used", st.session_state["lon_sel"])
     modelo_sel = st.session_state.get("modelo_used", modelo_sel)
     dias_prev  = st.session_state.get("dias_used",   dias_prev)
+    df_main    = st.session_state["df_main"]
+    ensemble_raw = st.session_state["ensemble_raw"]
+    df_ic_cache  = st.session_state["df_ic_cache"]
+    dados_nasa   = st.session_state["dados_nasa"]
+    df_focos     = st.session_state["df_focos"]
+    janelas_df   = st.session_state["janelas_df"]
+    riscos       = st.session_state["riscos"]
+    alertas      = st.session_state["alertas"]
+    bh           = st.session_state["bh"]
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # COLETA E PROCESSAMENTO DE DADOS
-    # ─────────────────────────────────────────────────────────────────────────
-    progresso = st.progress(0, text="Inicializando coleta de dados...")
-
-    with st.spinner(""):
-        progresso.progress(10, text=f"🌤 Coletando Open-Meteo ({MODELOS_OPENMETEO[modelo_sel]})...")
-        dados_raw = buscar_openmeteo(lat, lon, modelo_sel, dias_prev)
-
-        if "_erro" in dados_raw:
-            st.error(f"❌ Erro ao acessar Open-Meteo: {dados_raw['_erro']}")
-            st.session_state["analisado"] = False
-            st.stop()
-
-        df_main = openmeteo_para_df(dados_raw)
-        if df_main.empty:
-            st.error("❌ Nenhum dado retornado pela API. Verifique as coordenadas e tente novamente.")
-            st.session_state["analisado"] = False
-            st.stop()
-
-        progresso.progress(25, text="📊 Calculando ensemble multi-modelo...")
-        ensemble_raw = {}
-        df_ic_cache  = {}
-        if calcular_ic:
-            ensemble_raw = buscar_ensemble_openmeteo(lat, lon, dias_prev)
-            for v in ["temperature_2m","precipitation","relativehumidity_2m","windspeed_10m"]:
-                df_ic_cache[v] = calcular_intervalo_confianca(ensemble_raw, v)
-
-        progresso.progress(50, text="☀️ Consultando NASA POWER (solo/radiação)...")
-        dados_nasa = buscar_nasa_power(lat, lon)
-
-        progresso.progress(65, text="🔥 Consultando INPE Queimadas...")
-        df_focos = buscar_focos_inpe()
-
-        progresso.progress(78, text="📐 Processando análises agronômicas...")
-        janelas_df = calcular_janelas_defensivos(df_main)
-        riscos     = calcular_risco_fitossanitario(df_main)
-        alertas    = calcular_alertas_meteo(df_main, lat)
-        bh         = calcular_balanco_hidrico(df_main, CAD_PADRAO_MM)
-
-        progresso.progress(95, text="🎨 Renderizando painéis...")
-
-    progresso.progress(100, text="✅ Análise concluída!")
+    # Segurança: se df_main for None (sessão recarregada sem análise), pede nova análise
+    if df_main is None or (isinstance(df_main, pd.DataFrame) and df_main.empty):
+        st.warning("⚠️ Dados não encontrados. Clique em **GERAR ANÁLISE** para carregar.")
+        st.stop()
 
     # ─────────────────────────────────────────────────────────────────────────
     # BANNER DO PONTO ANALISADO
@@ -1307,7 +1297,6 @@ def main():
             "GFS validado para o Centro-Oeste (Souza et al. 2021); "
             "ICON superior para convecção subtropical (Zängl et al. 2015)")
 
-        # Gráfico com IC
         vars_disponiveis = [v for v in VARIAVEIS_HORARIAS if v in df_main.columns]
         var_escolhida = st.selectbox(
             "Variável para gráfico detalhado (com intervalo de confiança):",
@@ -1315,13 +1304,12 @@ def main():
             format_func=lambda v: LABELS_PT.get(v, v),
             index=0,
         )
-        df_ic_var = df_ic_cache.get(var_escolhida, pd.DataFrame()) if calcular_ic else pd.DataFrame()
+        df_ic_var = df_ic_cache.get(var_escolhida, pd.DataFrame())
         fig_ic = fig_variavel_com_ic(df_main, var_escolhida, df_ic_var)
         st.pyplot(fig_ic, use_container_width=True)
         plt.close(fig_ic)
 
-        # Nota de confiança
-        if calcular_ic and not df_ic_var.empty:
+        if df_ic_var is not None and not df_ic_var.empty:
             cv_med = df_ic_var["cv_pct"].mean()
             conf   = "Alta" if cv_med < 10 else ("Moderada" if cv_med < 25 else "Baixa")
             cor_c  = "#22c55e" if conf=="Alta" else ("#fbbf24" if conf=="Moderada" else "#ef4444")
@@ -1335,7 +1323,6 @@ def main():
                 f'(Buizza et al. 2005).</div>',
                 unsafe_allow_html=True)
 
-        # Painel multi-variável
         st.markdown('<div class="secao-titulo">📊 Painel Geral — Múltiplas Variáveis</div>',
                     unsafe_allow_html=True)
         vars_painel = st.multiselect(
@@ -1352,8 +1339,7 @@ def main():
                 st.pyplot(fig_multi, use_container_width=True)
                 plt.close(fig_multi)
 
-        # Análise de spread entre modelos
-        if calcular_ic and ensemble_raw:
+        if ensemble_raw:
             st.markdown(
                 '<div class="secao-titulo">🔬 Spread entre Modelos — Análise de Incerteza</div>',
                 unsafe_allow_html=True)
@@ -1374,7 +1360,6 @@ def main():
                 "**> 25%** = Baixa confiança (elevada incerteza). "
                 "Metodologia: Goswami et al. (2010); Buizza et al. (2005).")
 
-        # Tabela horária completa
         st.markdown('<div class="secao-titulo">🗃️ Dados Horários Completos</div>',
                     unsafe_allow_html=True)
         df_disp = df_previsao_display(df_main)
@@ -1406,7 +1391,6 @@ def main():
             df_stat.columns = ["Média","Desvio Padrão","Mínimo","Máximo"]
             st.dataframe(df_stat, use_container_width=True)
 
-            # Distribuição de temperatura
             st.markdown('<div class="secao-titulo">🌡️ Distribuição de Temperatura no Período</div>',
                         unsafe_allow_html=True)
             temp_s = df_main["temperature_2m"].dropna()
@@ -1428,7 +1412,6 @@ def main():
                 st.pyplot(fig_t, use_container_width=True)
                 plt.close(fig_t)
 
-            # Precipitação acumulada diária
             st.markdown('<div class="secao-titulo">🌧️ Precipitação Acumulada por Dia</div>',
                         unsafe_allow_html=True)
             pp_diario = df_main["precipitation"].resample("D").sum()
@@ -1453,7 +1436,6 @@ def main():
             st.pyplot(fig_pp, use_container_width=True)
             plt.close(fig_pp)
 
-        # Umidade do solo — NASA POWER
         st.markdown(
             '<div class="secao-titulo">🌱 Umidade do Solo — NASA POWER (últimos 30 dias)</div>',
             unsafe_allow_html=True)
@@ -1480,8 +1462,7 @@ def main():
                     ax_s.axhline(0.2, color="#ef4444", linewidth=0.8, linestyle=":",
                                  alpha=0.8, label="Ponto de murcha permanente (0.2)")
                     ax_s.set_ylim(0, 1.05)
-                    ax_s.set_ylabel("Umidade relativa (fração 0–1)",
-                                    color="#9ca3af", fontsize=9)
+                    ax_s.set_ylabel("Umidade relativa (fração 0–1)", color="#9ca3af", fontsize=9)
                     step = max(1, len(datas_n) // 10)
                     ax_s.set_xticks(range(0, len(datas_n), step))
                     ax_s.set_xticklabels(
@@ -1496,7 +1477,6 @@ def main():
                     st.pyplot(fig_s, use_container_width=True)
                     plt.close(fig_s)
 
-                    # Tabela resumo
                     df_solo = pd.DataFrame({
                         "Data":             [f"{datas_n[i][6:8]}/{datas_n[i][4:6]}/{datas_n[i][:4]}"
                                              for i in range(len(datas_n))],
@@ -1511,7 +1491,6 @@ def main():
         else:
             st.info("ℹ️ NASA POWER não respondeu. Verifique a conexão e tente novamente.")
 
-        # Balanço hídrico
         st.markdown(
             f'<div class="secao-titulo">💧 Balanço Hídrico — Thornthwaite-Mather</div>',
             unsafe_allow_html=True)
@@ -1588,7 +1567,6 @@ def main():
             f"Análise consolidada para **{abs(lat):.4f}°S, {abs(lon):.4f}°W** · "
             f"Gerada em {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
-        # Cards de síntese
         col_s1, col_s2, col_s3 = st.columns(3)
 
         with col_s1:
@@ -1608,7 +1586,7 @@ def main():
                 f'</div>', unsafe_allow_html=True)
 
         with col_s2:
-            if not janelas_df.empty:
+            if janelas_df is not None and not janelas_df.empty:
                 n_ab  = int((janelas_df["status"] == "aberta").sum())
                 n_tot = len(janelas_df)
                 bloco = cur = 0
@@ -1643,7 +1621,6 @@ def main():
         st.markdown("---")
         st.markdown("### 📋 Relatório Narrativo Técnico")
 
-        # Temperatura
         if "temperature_2m" in df_main.columns:
             tmax_v = df_main["temperature_2m"].resample("D").max().max()
             tmin_v = df_main["temperature_2m"].resample("D").min().min()
@@ -1662,7 +1639,6 @@ def main():
                 f'{geada_txt} · {calor_txt}</p></div>',
                 unsafe_allow_html=True)
 
-        # Precipitação
         if "precipitation" in df_main.columns:
             pp_total = df_main["precipitation"].sum()
             pp_max   = df_main["precipitation"].resample("D").sum().max()
@@ -1683,7 +1659,6 @@ def main():
                 f'{pp_rec}{veranico}</p></div>',
                 unsafe_allow_html=True)
 
-        # Vento
         if "windspeed_10m" in df_main.columns:
             vt_med  = df_main["windspeed_10m"].mean()
             gust_c  = df_main.get("windgusts_10m", df_main["windspeed_10m"])
@@ -1699,7 +1674,6 @@ def main():
                 f'<b>{h_vt_ok}h</b><br>{raj_txt}</p></div>',
                 unsafe_allow_html=True)
 
-        # Irrigação
         if bh:
             st.markdown(
                 f'<div class="info-card"><h4>💧 Manejo de Irrigação</h4>'
@@ -1709,8 +1683,7 @@ def main():
                 f'<b>Recomendação:</b> {bh["recomendacao"]}</p></div>',
                 unsafe_allow_html=True)
 
-        # Janela de defensivos
-        if not janelas_df.empty:
+        if janelas_df is not None and not janelas_df.empty:
             abertas = janelas_df[janelas_df["status"] == "aberta"]
             if not abertas.empty:
                 h_ini = abertas.index[0].strftime("%Hh")
@@ -1733,7 +1706,6 @@ def main():
                     'Adie as aplicações para o próximo período favorável.</p></div>',
                     unsafe_allow_html=True)
 
-        # Riscos fitossanitários
         for r in riscos.values():
             if r["nivel"] != "Baixo":
                 st.markdown(
@@ -1744,7 +1716,6 @@ def main():
                     f'</div>',
                     unsafe_allow_html=True)
 
-        # Tabela resumo diário 7 dias
         st.markdown('<div class="secao-titulo">📅 Resumo Diário — Próximos 7 Dias</div>',
                     unsafe_allow_html=True)
         try:
@@ -1801,7 +1772,6 @@ def main():
                 f'</div>',
                 unsafe_allow_html=True)
 
-        # Matriz de risco
         st.markdown(
             '<div class="secao-titulo">🔲 Matriz de Risco Hora × Variável (24h)</div>',
             unsafe_allow_html=True)
@@ -1811,7 +1781,6 @@ def main():
             st.pyplot(fig_mat, use_container_width=True)
             plt.close(fig_mat)
 
-        # Risco fitossanitário detalhado
         st.markdown(
             '<div class="secao-titulo">🍂 Risco Fitossanitário Detalhado (48h)</div>',
             unsafe_allow_html=True)
@@ -1827,7 +1796,6 @@ def main():
                 f'</span></div>',
                 unsafe_allow_html=True)
 
-        # Evolução temporal do risco
         st.markdown(
             '<div class="secao-titulo">📊 Evolução Temporal das Janelas de Risco (48h)</div>',
             unsafe_allow_html=True)
@@ -1858,15 +1826,13 @@ def main():
         st.pyplot(fig_r, use_container_width=True)
         plt.close(fig_r)
 
-        # Janela de defensivos — detalhe
         st.markdown(
             '<div class="secao-titulo">🧪 Janela de Aplicação de Defensivos — 24h</div>',
             unsafe_allow_html=True)
         st.caption("**Critérios MAPA/Embrapa (Portaria 371/2020):** "
                    "Vento < 10 km/h  ·  Temperatura < 30°C  ·  UR > 55%  ·  Sem precipitação")
 
-        if not janelas_df.empty:
-            # Timeline visual
+        if janelas_df is not None and not janelas_df.empty:
             n_cols_j = min(24, len(janelas_df))
             cols_j   = st.columns(n_cols_j)
             for i, (idx_j, row_j) in enumerate(janelas_df.head(n_cols_j).iterrows()):
@@ -1930,7 +1896,7 @@ def main():
                 with st.spinner("Gerando e enviando relatório..."):
                     html_rel = gerar_html_relatorio(
                         lat, lon, df_main, alertas, riscos, bh,
-                        janelas_df.to_dict("records") if not janelas_df.empty else [],
+                        janelas_df.to_dict("records") if janelas_df is not None and not janelas_df.empty else [],
                         f"{abs(lat):.4f}°S, {abs(lon):.4f}°W"
                     )
                     tem_crit = any(a["nivel"] == "vermelho" for a in alertas)
@@ -1949,7 +1915,7 @@ def main():
             if st.button("👁 Pré-visualizar HTML", use_container_width=True):
                 html_prev = gerar_html_relatorio(
                     lat, lon, df_main, alertas, riscos, bh,
-                    janelas_df.to_dict("records") if not janelas_df.empty else [],
+                    janelas_df.to_dict("records") if janelas_df is not None and not janelas_df.empty else [],
                     f"{abs(lat):.4f}°S, {abs(lon):.4f}°W"
                 )
                 components.html(html_prev, height=680, scrolling=True)
@@ -1972,7 +1938,7 @@ def main():
     st.markdown(f"""
     <div style="text-align:center;padding:14px;color:#888;font-size:0.78rem;">
       <b style="color:{VERDE_ESCURO};">Yamada Engenharia</b> — Meteorologia Aplicada ao Agronegócio · MS<br>
-      Open-Meteo (GFS · ICON · ERA5) · NASA POWER · INPE BDQueimadas · v4.1<br>
+      Open-Meteo (GFS · ICON · ERA5) · NASA POWER · INPE BDQueimadas · v4.2<br>
       <i>Souza et al. (2021) · Zängl et al. (2015) · Hersbach et al. (2020) ·
       Buizza et al. (2005) · Del Ponte et al. (2006) · Hargreaves & Samani (1985)</i><br>
       {datetime.now().strftime('%d/%m/%Y %H:%M')}
