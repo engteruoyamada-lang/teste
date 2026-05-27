@@ -1,11 +1,22 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# IMPORTS
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+=============================================================================
+YAMADA ENGENHARIA — Agrometeorologia para Fazendas do MS  v5.0
+=============================================================================
+Estrutura:
+  • Sidebar  : seleciona fazenda mock + modelo + variáveis
+  • Aba 0 ★  : Síntese   — matrizes defensivos + irrigação (padrão EMBRAPA)
+  • Aba 1    : Precipitação
+  • Aba 2    : Temperatura
+  • Aba 3    : Umidade Relativa
+  • Aba 4    : Vento
+  • Aba 5    : Relatório & E-mail
+Fonte única: Open-Meteo (GFS + ICON — melhores para convecção subtropical MS)
+=============================================================================
+"""
+
+# ─── IMPORTS ──────────────────────────────────────────────────────────────────
 import streamlit as st
 import streamlit.components.v1 as components
-import folium
-from streamlit_folium import st_folium
-
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -14,30 +25,15 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
-from matplotlib.figure import Figure
-
 import requests
-import json
-import os
-import io
-import threading
-import logging
-import warnings
-from datetime import datetime, timezone, timedelta
-
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-
+from datetime import datetime, timedelta
+import warnings
 warnings.filterwarnings("ignore")
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURAÇÃO DA PÁGINA
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── PAGE CONFIG ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Yamada Engenharia | Agrometeorologia MS",
     page_icon="🌿",
@@ -45,257 +41,204 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# IDENTIDADE VISUAL
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── PALETA ───────────────────────────────────────────────────────────────────
 VERDE_ESCURO  = "#1B4D2E"
 VERDE_MEDIO   = "#3DA63A"
 PRETO         = "#1A1A1A"
 CINZA_CLARO   = "#F4F7F4"
 AMARELO_ALERT = "#F5A623"
 VERMELHO_ALRT = "#D0021B"
+BG_DARK       = "#0d1117"
+BG_PANEL      = "#111827"
 
+# ─── CSS ──────────────────────────────────────────────────────────────────────
 CSS = f"""
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;900&family=Source+Sans+3:wght@300;400;600&display=swap');
-  html, body, [class*="css"] {{
-    font-family: 'Source Sans 3', sans-serif;
-    background-color: {CINZA_CLARO}; color: {PRETO};
-  }}
-  .yamada-header {{
-    background: linear-gradient(135deg, {VERDE_ESCURO} 0%, {VERDE_MEDIO} 100%);
-    border-radius: 12px; padding: 24px 32px; margin-bottom: 20px;
-    box-shadow: 0 4px 20px rgba(27,77,46,0.3);
-  }}
-  .yamada-header h1 {{
-    font-family:'Montserrat',sans-serif; font-weight:900; font-size:1.8rem;
-    color:white; margin:0; letter-spacing:-0.5px;
-  }}
-  .yamada-header p {{ color:rgba(255,255,255,0.82); margin:4px 0 0 0; font-size:0.9rem; }}
-  .info-card {{
-    background:white; border-left:4px solid {VERDE_MEDIO}; border-radius:8px;
-    padding:14px 18px; margin-bottom:10px; box-shadow:0 2px 8px rgba(0,0,0,0.06);
-  }}
-  .info-card h4 {{
-    font-family:'Montserrat',sans-serif; font-weight:700; color:{VERDE_ESCURO};
-    margin:0 0 4px 0; font-size:0.88rem;
-  }}
-  .info-card p {{ margin:0; font-size:0.82rem; color:#333; line-height:1.4; }}
-  .alert-verde    {{ background:#e8f5e9; border-left:4px solid #43a047; border-radius:8px; padding:12px 16px; margin:6px 0; }}
-  .alert-amarelo  {{ background:#fff8e1; border-left:4px solid #fbc02d; border-radius:8px; padding:12px 16px; margin:6px 0; }}
-  .alert-vermelho {{ background:#ffebee; border-left:4px solid #e53935; border-radius:8px; padding:12px 16px; margin:6px 0; }}
-  .alert-laranja  {{ background:#fff3e0; border-left:4px solid #fb8c00; border-radius:8px; padding:12px 16px; margin:6px 0; }}
-  .alert-azul     {{ background:#e3f2fd; border-left:4px solid #1565c0; border-radius:8px; padding:12px 16px; margin:6px 0; }}
-  .secao-titulo {{
-    font-family:'Montserrat',sans-serif; font-weight:800; font-size:1.1rem;
-    color:{VERDE_ESCURO}; border-bottom:2px solid {VERDE_MEDIO};
-    padding-bottom:6px; margin:24px 0 14px 0;
-  }}
-  .coord-box {{
-    background: #1a2e1c; border: 1px solid #3DA63A; border-radius:10px;
-    padding: 12px 16px; margin: 8px 0;
-  }}
-  .coord-box span {{ color: #a5d6a7; font-size: 0.82rem; font-family: 'Montserrat', sans-serif; }}
-  .coord-val {{ color: #ffffff !important; font-weight: 700 !important; font-size: 0.95rem !important; }}
-  .stButton > button {{
-    background:linear-gradient(135deg,{VERDE_ESCURO},{VERDE_MEDIO}) !important;
-    color:white !important; font-family:'Montserrat',sans-serif !important;
-    font-weight:700 !important; border:none !important; border-radius:10px !important;
-    padding:12px 32px !important; width:100% !important;
-    box-shadow:0 4px 15px rgba(27,77,46,0.35) !important;
-    transition: all 0.2s ease !important;
-  }}
-  .stButton > button:hover {{
-    transform: translateY(-1px) !important;
-    box-shadow:0 6px 20px rgba(27,77,46,0.5) !important;
-  }}
-  section[data-testid="stSidebar"] {{
-    background-color:#1a2e1c !important; border-right:1px solid #2d5a30;
-  }}
-  section[data-testid="stSidebar"] * {{ color:#e8f5e9 !important; }}
-  section[data-testid="stSidebar"] label {{
-    font-family:'Montserrat',sans-serif !important; font-weight:600 !important;
-    font-size:0.83rem !important; color:#a5d6a7 !important;
-  }}
-  section[data-testid="stSidebar"] .stSelectbox > div > div {{
-    background-color:#2d5a30 !important; color:white !important; border-color:#3DA63A !important;
-  }}
-  section[data-testid="stSidebar"] hr {{ border-color:#2d5a30 !important; }}
-  section[data-testid="stSidebar"] .stNumberInput input {{
-    background-color:#2d5a30 !important; color:white !important;
-    border-color:#3DA63A !important; border-radius:6px !important;
-  }}
-  div[data-testid="metric-container"] {{
-    background:white; border-radius:10px; padding:14px;
-    box-shadow:0 2px 10px rgba(0,0,0,0.07); border-top:3px solid {VERDE_MEDIO};
-  }}
-  hr {{ border-color:#ddeedd; margin:18px 0; }}
-  .status-ponto {{
-    background: linear-gradient(135deg, #1a2e1c, #2d5a30);
-    border: 1px solid {VERDE_MEDIO}; border-radius: 10px;
-    padding: 10px 16px; margin: 10px 0;
-    font-family: 'Montserrat', sans-serif;
-  }}
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;900&family=Source+Sans+3:wght@300;400;600&display=swap');
+
+html, body, [class*="css"] {{
+  font-family:'Source Sans 3',sans-serif;
+  background-color:{CINZA_CLARO}; color:{PRETO};
+}}
+
+/* ── Header ── */
+.yamada-header {{
+  background:linear-gradient(135deg,{VERDE_ESCURO} 0%,{VERDE_MEDIO} 100%);
+  border-radius:12px; padding:22px 32px; margin-bottom:18px;
+  box-shadow:0 4px 20px rgba(27,77,46,0.3);
+}}
+.yamada-header h1 {{
+  font-family:'Montserrat',sans-serif; font-weight:900; font-size:1.75rem;
+  color:white; margin:0; letter-spacing:-0.5px;
+}}
+.yamada-header p {{ color:rgba(255,255,255,0.82); margin:4px 0 0 0; font-size:0.88rem; }}
+
+/* ── Cards ── */
+.info-card {{
+  background:white; border-left:4px solid {VERDE_MEDIO}; border-radius:8px;
+  padding:14px 18px; margin-bottom:10px; box-shadow:0 2px 8px rgba(0,0,0,0.06);
+}}
+.info-card h4 {{
+  font-family:'Montserrat',sans-serif; font-weight:700; color:{VERDE_ESCURO};
+  margin:0 0 4px 0; font-size:0.88rem;
+}}
+.info-card p {{ margin:0; font-size:0.82rem; color:#333; line-height:1.45; }}
+
+/* ── Alertas ── */
+.alert-verde    {{background:#e8f5e9;border-left:4px solid #43a047;border-radius:8px;padding:12px 16px;margin:6px 0;}}
+.alert-amarelo  {{background:#fff8e1;border-left:4px solid #fbc02d;border-radius:8px;padding:12px 16px;margin:6px 0;}}
+.alert-vermelho {{background:#ffebee;border-left:4px solid #e53935;border-radius:8px;padding:12px 16px;margin:6px 0;}}
+.alert-azul     {{background:#e3f2fd;border-left:4px solid #1565c0;border-radius:8px;padding:12px 16px;margin:6px 0;}}
+
+/* ── Seção título ── */
+.secao-titulo {{
+  font-family:'Montserrat',sans-serif; font-weight:800; font-size:1.05rem;
+  color:{VERDE_ESCURO}; border-bottom:2px solid {VERDE_MEDIO};
+  padding-bottom:5px; margin:22px 0 12px 0;
+}}
+
+/* ── Botão ── */
+.stButton>button {{
+  background:linear-gradient(135deg,{VERDE_ESCURO},{VERDE_MEDIO}) !important;
+  color:white !important; font-family:'Montserrat',sans-serif !important;
+  font-weight:700 !important; border:none !important; border-radius:10px !important;
+  padding:11px 28px !important; width:100% !important;
+  box-shadow:0 4px 14px rgba(27,77,46,0.35) !important;
+  transition:all 0.2s ease !important;
+}}
+.stButton>button:hover {{
+  transform:translateY(-1px) !important;
+  box-shadow:0 6px 20px rgba(27,77,46,0.5) !important;
+}}
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"] {{
+  background-color:#1a2e1c !important; border-right:1px solid #2d5a30;
+}}
+section[data-testid="stSidebar"] * {{ color:#e8f5e9 !important; }}
+section[data-testid="stSidebar"] label {{
+  font-family:'Montserrat',sans-serif !important; font-weight:600 !important;
+  font-size:0.82rem !important; color:#a5d6a7 !important;
+}}
+section[data-testid="stSidebar"] .stSelectbox>div>div {{
+  background-color:#2d5a30 !important; color:white !important;
+  border-color:#3DA63A !important;
+}}
+section[data-testid="stSidebar"] hr {{ border-color:#2d5a30 !important; }}
+
+/* ── Métricas ── */
+div[data-testid="metric-container"] {{
+  background:white; border-radius:10px; padding:13px;
+  box-shadow:0 2px 10px rgba(0,0,0,0.07); border-top:3px solid {VERDE_MEDIO};
+}}
+hr {{ border-color:#ddeedd; margin:16px 0; }}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURAÇÃO DE E-MAIL
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── E-MAIL (secrets opcionais) ───────────────────────────────────────────────
 try:
-    EMAIL_REMETENTE     = st.secrets["email"]["remetente"]
-    EMAIL_SENHA_APP     = st.secrets["email"]["senha_app"]
-    _dest_raw           = st.secrets["email"]["destinatario"]
-    EMAIL_DESTINATARIOS = ([e.strip() for e in _dest_raw.split(",") if e.strip()]
-                           if isinstance(_dest_raw, str) else list(_dest_raw))
-    _email_ok = True
+    _EMAIL_REM  = st.secrets["email"]["remetente"]
+    _EMAIL_PASS = st.secrets["email"]["senha_app"]
+    _dest_raw   = st.secrets["email"]["destinatario"]
+    _EMAIL_DEST = ([e.strip() for e in _dest_raw.split(",") if e.strip()]
+                   if isinstance(_dest_raw, str) else list(_dest_raw))
+    _EMAIL_OK   = True
 except Exception:
-    EMAIL_REMETENTE = ""; EMAIL_DESTINATARIOS = []; _email_ok = False
+    _EMAIL_REM = _EMAIL_PASS = ""; _EMAIL_DEST = []; _EMAIL_OK = False
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DADOS DE REFERÊNCIA GEOGRÁFICA
-# ─────────────────────────────────────────────────────────────────────────────
-CIDADES_MAPA = {
-    "Campo Grande":    (-20.4428, -54.6460),
-    "Dourados":        (-22.2212, -54.8056),
-    "Três Lagoas":     (-20.7519, -51.6783),
-    "Corumbá":         (-19.0078, -57.6500),
-    "Ponta Porã":      (-22.5361, -55.7253),
-    "Naviraí":         (-23.0622, -54.1914),
-    "Aquidauana":      (-20.4700, -55.7869),
-    "Maracaju":        (-21.6108, -55.1681),
-    "Coxim":           (-18.5069, -54.7600),
-    "Chapadão do Sul": (-18.7919, -52.6267),
-    "Sonora":          (-17.5583, -54.7611),
-    "Costa Rica":      (-18.5447, -53.1278),
-    "Rio Brilhante":   (-21.8028, -54.5447),
-    "Nova Andradina":  (-22.2333, -53.3444),
-    "Sidrolândia":     (-20.9319, -54.9600),
+# ─── FAZENDAS MOCK ────────────────────────────────────────────────────────────
+FAZENDAS = {
+    "Fazenda Santa Fé (Maracaju — Soja/Milho)":      {"lat": -21.614, "lon": -55.168, "area_ha": 3200, "cultura": "Soja/Milho"},
+    "Fazenda Água Limpa (Chapadão do Sul — Soja)":    {"lat": -18.791, "lon": -52.627, "area_ha": 4800, "cultura": "Soja"},
+    "Fazenda Planalto (Dourados — Soja/Trigo)":       {"lat": -22.221, "lon": -54.805, "area_ha": 2100, "cultura": "Soja/Trigo"},
+    "Fazenda Campo Verde (Rio Brilhante — Cana/Soja)":{"lat": -21.802, "lon": -54.544, "area_ha": 5600, "cultura": "Cana/Soja"},
+    "Fazenda Cerrado Vivo (Costa Rica — Soja)":       {"lat": -18.544, "lon": -53.127, "area_ha": 3900, "cultura": "Soja"},
+    "Fazenda Pantanal (Aquidauana — Pecuária)":       {"lat": -20.470, "lon": -55.786, "area_ha": 8200, "cultura": "Pastagem/Pecuária"},
+    "Fazenda Norte MS (Sonora — Soja/Milho)":         {"lat": -17.558, "lon": -54.761, "area_ha": 6100, "cultura": "Soja/Milho"},
+    "Fazenda Fronteira (Ponta Porã — Soja)":          {"lat": -22.536, "lon": -55.725, "area_ha": 2800, "cultura": "Soja"},
+    "Fazenda Leste (Nova Andradina — Eucalipto)":     {"lat": -22.233, "lon": -53.344, "area_ha": 1500, "cultura": "Eucalipto/Pastagem"},
+    "Fazenda Três Lagoas (Celulose/Pastagem)":        {"lat": -20.752, "lon": -51.678, "area_ha": 7400, "cultura": "Celulose/Pastagem"},
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MODELOS METEOROLÓGICOS
-# ─────────────────────────────────────────────────────────────────────────────
-MODELOS_OPENMETEO = {
-    "best_match":    "Best Match (Ensemble automático)",
-    "gfs_seamless":  "GFS (NOAA — EUA)",
-    "icon_seamless": "ICON (DWD — Alemanha)",
-    "era5_seamless": "ERA5 (ECMWF — Reanálise)",
+# ─── MODELOS OPEN-METEO ───────────────────────────────────────────────────────
+MODELOS = {
+    "best_match":    "Best Match (Ensemble GFS+ICON — recomendado)",
+    "gfs_seamless":  "GFS (NOAA — precipitação Centro-Oeste)",
+    "icon_seamless": "ICON (DWD — convecção subtropical)",
 }
 
-VARIAVEIS_HORARIAS = [
+# ─── VARIÁVEIS ────────────────────────────────────────────────────────────────
+VARS_HORARIAS = [
     "temperature_2m", "precipitation", "relativehumidity_2m",
-    "windspeed_10m", "windgusts_10m", "shortwave_radiation",
-    "dewpoint_2m", "apparent_temperature", "weathercode",
-    "surface_pressure", "cape", "cloudcover",
+    "windspeed_10m", "windgusts_10m", "dewpoint_2m",
+    "shortwave_radiation", "et0_fao_evapotranspiration",
+    "weathercode", "cape", "surface_pressure", "cloudcover",
+    "soil_moisture_0_to_1cm",
 ]
 
-LABELS_PT = {
-    "temperature_2m":       "Temperatura (°C)",
-    "precipitation":        "Precipitação (mm)",
-    "relativehumidity_2m":  "Umidade Relativa (%)",
-    "windspeed_10m":        "Vento (km/h)",
-    "windgusts_10m":        "Rajada de Vento (km/h)",
-    "shortwave_radiation":  "Radiação Solar (W/m²)",
-    "dewpoint_2m":          "Ponto de Orvalho (°C)",
-    "apparent_temperature": "Temperatura Aparente (°C)",
-    "weathercode":          "Código de Tempo (WMO)",
-    "surface_pressure":     "Pressão Superficial (hPa)",
-    "cape":                 "CAPE (J/kg)",
-    "cloudcover":           "Cobertura de Nuvens (%)",
+LABELS = {
+    "temperature_2m":              "Temperatura (°C)",
+    "precipitation":               "Precipitação (mm/h)",
+    "relativehumidity_2m":         "Umidade Relativa (%)",
+    "windspeed_10m":               "Velocidade do Vento (km/h)",
+    "windgusts_10m":               "Rajada de Vento (km/h)",
+    "dewpoint_2m":                 "Ponto de Orvalho (°C)",
+    "shortwave_radiation":          "Radiação Solar (W/m²)",
+    "et0_fao_evapotranspiration":   "ETo Penman-Monteith (mm/h)",
+    "weathercode":                 "Código de Tempo WMO",
+    "cape":                        "CAPE (J/kg)",
+    "surface_pressure":            "Pressão (hPa)",
+    "cloudcover":                  "Cobertura de Nuvens (%)",
+    "soil_moisture_0_to_1cm":      "Umidade do Solo 0–1cm (m³/m³)",
 }
 
-CORES_VAR = {
-    "temperature_2m":       "#f97316",
-    "precipitation":        "#3b82f6",
-    "relativehumidity_2m":  "#06b6d4",
-    "windspeed_10m":        "#a78bfa",
-    "windgusts_10m":        "#c084fc",
-    "shortwave_radiation":  "#fbbf24",
-    "dewpoint_2m":          "#34d399",
-    "apparent_temperature": "#fb7185",
-    "weathercode":          "#94a3b8",
-    "surface_pressure":     "#a3e635",
-    "cape":                 "#f43f5e",
-    "cloudcover":           "#cbd5e1",
+CORES = {
+    "temperature_2m":             "#f97316",
+    "precipitation":              "#3b82f6",
+    "relativehumidity_2m":        "#06b6d4",
+    "windspeed_10m":              "#a78bfa",
+    "windgusts_10m":              "#c084fc",
+    "dewpoint_2m":                "#34d399",
+    "shortwave_radiation":         "#fbbf24",
+    "et0_fao_evapotranspiration":  "#22c55e",
+    "cape":                       "#f43f5e",
+    "surface_pressure":           "#a3e635",
+    "cloudcover":                 "#cbd5e1",
+    "soil_moisture_0_to_1cm":     "#4ade80",
 }
 
-WCODE_MAP = {
-    0:"☀️ Céu limpo", 1:"🌤 Poucas nuvens", 2:"⛅ Parcialmente nublado",
-    3:"☁️ Nublado", 45:"🌫 Névoa", 48:"🌫 Névoa c/ geada",
-    51:"🌦 Chuvisco fraco", 53:"🌦 Chuvisco", 55:"🌦 Chuvisco forte",
+WCODE = {
+    0:"☀️ Céu limpo", 1:"🌤 Poucas nuvens", 2:"⛅ Parcial",
+    3:"☁️ Nublado", 45:"🌫 Névoa", 51:"🌦 Chuvisco leve",
     61:"🌧 Chuva fraca", 63:"🌧 Chuva moderada", 65:"🌧 Chuva forte",
-    71:"🌨 Neve fraca", 73:"🌨 Neve", 75:"🌨 Neve forte",
-    80:"🌦 Pancadas fracas", 81:"⛈ Pancadas", 82:"⛈ Pancadas fortes",
-    85:"🌨 Chuva de neve", 86:"🌨 Chuva de neve forte",
-    95:"⛈ Tempestade", 96:"⛈ Tempestade c/ granizo leve",
-    99:"⛈ Tempestade c/ granizo",
+    80:"🌦 Pancadas", 81:"⛈ Pancadas fortes", 82:"⛈ Pancadas severas",
+    95:"⛈ Tempestade", 96:"⛈ Tempestade + granizo", 99:"⛈ Granizo severo",
 }
 
-CAD_PADRAO_MM = 65.0
+# ─── PARÂMETROS EMBRAPA / MAPA ────────────────────────────────────────────────
+DEF_VENTO_MAX   = 10.0
+DEF_TEMP_MAX    = 30.0
+DEF_UR_MIN      = 55.0
+DEF_PRECIP_MAX  = 0.0
+
+IRR_UR_BAIXA    = 60.0
+IRR_UR_CRITICA  = 40.0
+IRR_TEMP_ALTA   = 32.0
+IRR_ETO_ALTA    = 0.25
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCHEDULER — KEEP ALIVE
+# COLETA DE DADOS — OPEN-METEO
 # ─────────────────────────────────────────────────────────────────────────────
-def _keep_alive():
-    try:
-        requests.get("https://yamada-agro-ms.streamlit.app/", timeout=20)
-    except Exception:
-        pass
 
-if "scheduler_started" not in st.session_state:
-    try:
-        _sched = BackgroundScheduler(timezone="America/Campo_Grande")
-        _sched.add_job(_keep_alive, trigger=IntervalTrigger(minutes=5),
-                       id="keepalive", replace_existing=True, max_instances=1)
-        _sched.start()
-        st.session_state["scheduler_started"] = True
-        st.session_state["scheduler_obj"] = _sched
-    except Exception:
-        st.session_state["scheduler_started"] = True
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INICIALIZAÇÃO DO SESSION STATE
-# ─────────────────────────────────────────────────────────────────────────────
-_DEFAULTS = {
-    "lat_sel":           -20.4428,
-    "lon_sel":           -54.6460,
-    "analisado":         False,
-    "dados_raw":         None,
-    "df_main":           None,
-    "ensemble_raw":      {},
-    "df_ic_cache":       {},
-    "dados_nasa":        None,
-    "df_focos":          None,
-    "janelas_df":        None,
-    "riscos":            None,
-    "alertas":           None,
-    "bh":                None,
-    "modelo_used":       "best_match",
-    "dias_used":         7,
-    "lat_used":          None,
-    "lon_used":          None,
-    # ── NOVO: chave de guarda contra requisições duplicadas ──
-    "dados_buscados_key": None,
-}
-for k, v in _DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FUNÇÕES DE COLETA DE DADOS
-# ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=1800, show_spinner=False)
-def buscar_openmeteo(lat: float, lon: float, modelo: str, dias: int = 7) -> dict:
-    vars_h = ",".join(VARIAVEIS_HORARIAS)
+def buscar_previsao(lat: float, lon: float, modelo: str, dias: int = 7) -> dict:
+    vars_str = ",".join(VARS_HORARIAS)
     url = (
         f"https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lat}&longitude={lon}"
-        f"&hourly={vars_h}"
-        f"&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,"
-        f"weathercode,windspeed_10m_max,et0_fao_evapotranspiration,"
-        f"precipitation_probability_max,uv_index_max"
+        f"?latitude={lat:.4f}&longitude={lon:.4f}"
+        f"&hourly={vars_str}"
         f"&timezone=America%2FCampo_Grande"
         f"&forecast_days={dias}"
         f"&models={modelo}"
@@ -309,83 +252,42 @@ def buscar_openmeteo(lat: float, lon: float, modelo: str, dias: int = 7) -> dict
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def buscar_ensemble_openmeteo(lat: float, lon: float, dias: int = 7) -> dict:
-    resultados = {}
-    vars_h = "temperature_2m,precipitation,relativehumidity_2m,windspeed_10m"
+def buscar_ensemble(lat: float, lon: float, dias: int = 7) -> dict:
+    out = {}
+    vars_ic = "temperature_2m,precipitation,relativehumidity_2m,windspeed_10m"
     for mod in ["gfs_seamless", "icon_seamless", "best_match"]:
         url = (
             f"https://api.open-meteo.com/v1/forecast"
-            f"?latitude={lat}&longitude={lon}"
-            f"&hourly={vars_h}"
+            f"?latitude={lat:.4f}&longitude={lon:.4f}"
+            f"&hourly={vars_ic}"
             f"&timezone=America%2FCampo_Grande"
             f"&forecast_days={dias}&models={mod}"
         )
         try:
             r = requests.get(url, timeout=20)
             r.raise_for_status()
-            resultados[mod] = r.json()
+            out[mod] = r.json()
         except Exception:
             pass
-    return resultados
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def buscar_nasa_power(lat: float, lon: float) -> dict:
-    fim    = datetime.now()
-    inicio = fim - timedelta(days=30)
-    url = (
-        f"https://power.larc.nasa.gov/api/temporal/daily/point"
-        f"?parameters=T2M,RH2M,ALLSKY_SFC_SW_DWN,WS10M,PRECTOTCORR,GWETTOP,GWETROOT"
-        f"&community=AG&longitude={lon}&latitude={lat}"
-        f"&start={inicio.strftime('%Y%m%d')}&end={fim.strftime('%Y%m%d')}&format=JSON"
-    )
-    try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return {}
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def buscar_focos_inpe() -> pd.DataFrame:
-    try:
-        url = "https://queimadas.dgi.inpe.br/api/focos/"
-        params = {"pais_id": 33, "estado_id": 50, "satelite": "AQUA_M-T"}
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, list) and data:
-            return pd.DataFrame(data)
-        return pd.DataFrame()
-    except Exception:
-        np.random.seed(42)
-        n = 8
-        return pd.DataFrame({
-            "latitude":  np.random.uniform(-23.0, -17.5, n),
-            "longitude": np.random.uniform(-57.0, -51.5, n),
-            "frp":       np.random.uniform(5, 80, n),
-            "_simulado": [True]*n,
-        })
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROCESSAMENTO DOS DADOS BRUTOS
+# CONVERSÃO PARA DATAFRAME
 # ─────────────────────────────────────────────────────────────────────────────
-def openmeteo_para_df(dados: dict) -> pd.DataFrame:
+
+def json_para_df(dados: dict) -> pd.DataFrame:
     if not dados or "hourly" not in dados or "_erro" in dados:
         return pd.DataFrame()
-    h = dados["hourly"]
-    times = pd.to_datetime(h["time"])
-    df = pd.DataFrame({"datetime": times})
-    for var in VARIAVEIS_HORARIAS:
-        if var in h:
-            df[var] = pd.to_numeric(h[var], errors="coerce")
-    df = df.set_index("datetime")
-    return df
+    h  = dados["hourly"]
+    df = pd.DataFrame({"datetime": pd.to_datetime(h["time"])})
+    for v in VARS_HORARIAS:
+        if v in h:
+            df[v] = pd.to_numeric(h[v], errors="coerce")
+    return df.set_index("datetime")
 
 
-def calcular_intervalo_confianca(ensemble: dict, var: str) -> pd.DataFrame:
+def ic_entre_modelos(ensemble: dict, var: str) -> pd.DataFrame:
     series = []
     for mod, dados in ensemble.items():
         if "hourly" in dados and var in dados["hourly"]:
@@ -397,1553 +299,1012 @@ def calcular_intervalo_confianca(ensemble: dict, var: str) -> pd.DataFrame:
             series.append(s)
     if len(series) < 2:
         return pd.DataFrame()
-    df_ens = pd.concat(series, axis=1)
-    media  = df_ens.mean(axis=1)
-    std    = df_ens.std(axis=1)
-    result = pd.DataFrame({
-        "media":     media,
+    df_e = pd.concat(series, axis=1)
+    med  = df_e.mean(axis=1)
+    std  = df_e.std(axis=1)
+    return pd.DataFrame({
+        "media":     med,
         "std":       std,
-        "min":       df_ens.min(axis=1),
-        "max":       df_ens.max(axis=1),
-        "ic68_low":  media - std,
-        "ic68_high": media + std,
-        "ic95_low":  media - 2*std,
-        "ic95_high": media + 2*std,
+        "ic68_low":  med - std,
+        "ic68_high": med + std,
+        "ic95_low":  med - 2*std,
+        "ic95_high": med + 2*std,
+        "cv_pct":   (std / (med.abs() + 1e-6) * 100).round(1),
     })
-    result["cv_pct"] = (std / (media.abs() + 1e-6) * 100).round(1)
-    return result
 
 
-def calcular_janelas_defensivos(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame()
-    df2 = df.copy().head(24)
-    rest = pd.DataFrame(index=df2.index)
-    rest["vento_ok"] = (df2.get("windspeed_10m",  pd.Series(5,  index=df2.index)) < 10).astype(int)
-    rest["temp_ok"]  = (df2.get("temperature_2m", pd.Series(25, index=df2.index)) < 30).astype(int)
-    rest["ur_ok"]    = (df2.get("relativehumidity_2m", pd.Series(65, index=df2.index)) > 55).astype(int)
-    rest["chuva_ok"] = (df2.get("precipitation",  pd.Series(0,  index=df2.index)) == 0).astype(int)
-    rest["n_ok"]     = rest[["vento_ok","temp_ok","ur_ok","chuva_ok"]].sum(axis=1)
-    rest["status"]   = rest["n_ok"].apply(
-        lambda x: "aberta" if x == 4 else ("parcial" if x >= 3 else "bloqueada"))
-    rest["n_restricoes"] = 4 - rest["n_ok"]
+# ─────────────────────────────────────────────────────────────────────────────
+# ANÁLISES EMBRAPA
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def motivo(row):
+def calcular_janela_defensivos(df: pd.DataFrame) -> pd.DataFrame:
+    df24 = df.head(24).copy()
+    out  = pd.DataFrame(index=df24.index)
+
+    out["vento_ok"] = (df24.get("windspeed_10m",
+                                pd.Series(5,  index=df24.index)) < DEF_VENTO_MAX).astype(int)
+    out["temp_ok"]  = (df24.get("temperature_2m",
+                                pd.Series(25, index=df24.index)) < DEF_TEMP_MAX).astype(int)
+    out["ur_ok"]    = (df24.get("relativehumidity_2m",
+                                pd.Series(65, index=df24.index)) >= DEF_UR_MIN).astype(int)
+    out["chuva_ok"] = (df24.get("precipitation",
+                                pd.Series(0,  index=df24.index)) <= DEF_PRECIP_MAX).astype(int)
+    out["n_ok"]     = out[["vento_ok","temp_ok","ur_ok","chuva_ok"]].sum(axis=1)
+    out["status"]   = out["n_ok"].map(lambda x: "aberta" if x==4 else
+                                                ("parcial" if x==3 else "bloqueada"))
+
+    def _motivo(row):
+        src = df24
         m = []
         idx = row.name
         if not row["vento_ok"]:
-            v = df2.get("windspeed_10m", pd.Series()).reindex([idx])
-            m.append(f"Vento {v.iloc[0]:.0f}km/h" if not v.empty and pd.notna(v.iloc[0]) else "Vento alto")
+            v = src["windspeed_10m"].get(idx, 0) if "windspeed_10m" in src.columns else 0
+            m.append(f"Vento {v:.0f} km/h ≥ {DEF_VENTO_MAX:.0f}")
         if not row["temp_ok"]:
-            v = df2.get("temperature_2m", pd.Series()).reindex([idx])
-            m.append(f"Temp {v.iloc[0]:.0f}°C" if not v.empty and pd.notna(v.iloc[0]) else "Temp alta")
+            v = src["temperature_2m"].get(idx, 0) if "temperature_2m" in src.columns else 0
+            m.append(f"Temp {v:.0f}°C ≥ {DEF_TEMP_MAX:.0f}")
         if not row["ur_ok"]:
-            v = df2.get("relativehumidity_2m", pd.Series()).reindex([idx])
-            m.append(f"UR {v.iloc[0]:.0f}%" if not v.empty and pd.notna(v.iloc[0]) else "UR baixa")
+            v = src["relativehumidity_2m"].get(idx, 0) if "relativehumidity_2m" in src.columns else 0
+            m.append(f"UR {v:.0f}% < {DEF_UR_MIN:.0f}")
         if not row["chuva_ok"]:
-            v = df2.get("precipitation", pd.Series()).reindex([idx])
-            m.append(f"Chuva {v.iloc[0]:.1f}mm" if not v.empty and pd.notna(v.iloc[0]) else "Chuva")
-        return " | ".join(m) if m else "✅ Todos OK"
+            v = src["precipitation"].get(idx, 0) if "precipitation" in src.columns else 0
+            m.append(f"Chuva {v:.1f} mm")
+        return " · ".join(m) if m else "✅ Todos os critérios atendidos"
 
-    rest["motivo"] = rest.apply(motivo, axis=1)
-    return rest
+    out["motivo"] = out.apply(_motivo, axis=1)
+    return out
 
 
-def calcular_risco_fitossanitario(df: pd.DataFrame) -> dict:
-    if df.empty:
-        return {
-            "ferrugem": {"doenca": "Ferrugem Asiática (Soja)", "horas_consecutivas": 0,
-                         "horas_total": 0, "nivel": "Baixo", "limiar": 12,
-                         "condicao": pd.Series(dtype=bool), "cor": "verde",
-                         "emoji": "🍂", "referencia": "Del Ponte et al. (2006)"},
-            "brusone":  {"doenca": "Brusone (Arroz/Trigo)", "horas_consecutivas": 0,
-                         "horas_total": 0, "nivel": "Baixo", "limiar": 10,
-                         "condicao": pd.Series(dtype=bool), "cor": "verde",
-                         "emoji": "🌾", "referencia": "Filippi & Prabhu (2001)"},
-        }
+def calcular_janela_irrigacao(df: pd.DataFrame) -> pd.DataFrame:
     df48 = df.head(48).copy()
-    temp = df48.get("temperature_2m",      pd.Series(25, index=df48.index))
-    umid = df48.get("relativehumidity_2m", pd.Series(70, index=df48.index))
-    riscos = {}
+    out  = pd.DataFrame(index=df48.index)
 
-    cond_fer = (temp >= 15) & (temp <= 30) & (umid > 80)
-    max_seq_fer = cur_fer = 0
-    for v in cond_fer:
-        if v: cur_fer += 1; max_seq_fer = max(max_seq_fer, cur_fer)
-        else: cur_fer = 0
-    nivel_fer = ("Crítico" if max_seq_fer >= 20 else
-                 "Alto"    if max_seq_fer >= 16 else
-                 "Médio"   if max_seq_fer >= 12 else "Baixo")
-    riscos["ferrugem"] = {
-        "doenca": "Ferrugem Asiática (Soja)",
-        "horas_consecutivas": max_seq_fer,
-        "horas_total": int(cond_fer.sum()),
-        "nivel": nivel_fer, "limiar": 12, "condicao": cond_fer,
-        "cor": "vermelho" if nivel_fer in ["Crítico","Alto"] else
-               ("amarelo" if nivel_fer == "Médio" else "verde"),
-        "emoji": "🍂", "referencia": "Del Ponte et al. (2006); Yorinori et al. (2005)",
-    }
+    ur   = df48.get("relativehumidity_2m",        pd.Series(65,   index=df48.index))
+    tmp  = df48.get("temperature_2m",             pd.Series(27,   index=df48.index))
+    eto  = df48.get("et0_fao_evapotranspiration", pd.Series(0.15, index=df48.index))
 
-    cond_bru = (temp >= 20) & (temp <= 28) & (umid > 90)
-    max_seq_bru = cur_bru = 0
-    for v in cond_bru:
-        if v: cur_bru += 1; max_seq_bru = max(max_seq_bru, cur_bru)
-        else: cur_bru = 0
-    nivel_bru = ("Crítico" if max_seq_bru >= 18 else
-                 "Alto"    if max_seq_bru >= 14 else
-                 "Médio"   if max_seq_bru >= 10 else "Baixo")
-    riscos["brusone"] = {
-        "doenca": "Brusone (Arroz/Trigo)",
-        "horas_consecutivas": max_seq_bru,
-        "horas_total": int(cond_bru.sum()),
-        "nivel": nivel_bru, "limiar": 10, "condicao": cond_bru,
-        "cor": "vermelho" if nivel_bru in ["Crítico","Alto"] else
-               ("amarelo" if nivel_bru == "Médio" else "verde"),
-        "emoji": "🌾", "referencia": "Filippi & Prabhu (2001)",
-    }
-    return riscos
+    out["ur_nivel"]  = ur.apply(lambda v:  0 if v >= IRR_UR_BAIXA else
+                                           (1 if v >= IRR_UR_CRITICA else 2))
+    out["tmp_nivel"] = tmp.apply(lambda v: 0 if v < IRR_TEMP_ALTA else
+                                           (1 if v < 38 else 2))
+    out["eto_nivel"] = eto.apply(lambda v: 0 if v < IRR_ETO_ALTA else
+                                           (1 if v < 0.40 else 2))
+
+    out["nivel_max"]   = out[["ur_nivel","tmp_nivel","eto_nivel"]].max(axis=1)
+    out["status_irr"]  = out["nivel_max"].map(
+        {0:"sem_necessidade", 1:"atencao", 2:"irrigar"})
+
+    def _motivo_irr(row):
+        m = []
+        if row["ur_nivel"]  == 2: m.append(f"UR crítica (<{IRR_UR_CRITICA:.0f}%)")
+        elif row["ur_nivel"]== 1: m.append(f"UR baixa (<{IRR_UR_BAIXA:.0f}%)")
+        if row["tmp_nivel"] >= 1: m.append(f"Calor (>{IRR_TEMP_ALTA:.0f}°C)")
+        if row["eto_nivel"] >= 1: m.append(f"ETo elevada (>{IRR_ETO_ALTA:.2f} mm/h)")
+        return " · ".join(m) if m else "Solo adequadamente abastecido"
+
+    out["motivo_irr"] = out.apply(_motivo_irr, axis=1)
+    return out
 
 
-def calcular_alertas_meteo(df: pd.DataFrame, lat: float) -> list:
-    alertas = []
-    if df.empty:
-        return [{"nivel":"verde","icone":"✅",
-                 "titulo":"🟢 Sem alertas ativos",
-                 "msg":"Dados insuficientes para gerar alertas."}]
-    try:
-        df_daily = df.resample("D").agg({
-            "temperature_2m":      ["max","min"],
-            "precipitation":       "sum",
-            "windgusts_10m":       "max",
-            "cape":                "max",
-            "relativehumidity_2m": "mean",
-        }).head(7)
+def resumo_janelas(df_def: pd.DataFrame, df_irr: pd.DataFrame) -> dict:
+    n_ab  = int((df_def["status"] == "aberta").sum())
+    n_pa  = int((df_def["status"] == "parcial").sum())
+    n_bl  = int((df_def["status"] == "bloqueada").sum())
 
-        for dia, row in df_daily.iterrows():
-            try:
-                tmin = row[("temperature_2m","min")]
-                tmax = row[("temperature_2m","max")]
-                pp   = row[("precipitation","sum")]
-                raj  = row.get(("windgusts_10m","max"), None)
-                cape = row.get(("cape","max"), None)
-                data_str = dia.strftime("%d/%m")
-
-                if pd.notna(tmin) and tmin < 5:
-                    nivel = "vermelho" if tmin < 2 else "amarelo"
-                    alertas.append({"nivel": nivel, "icone": "❄️",
-                        "titulo": f"{'🔴 EMERGÊNCIA' if tmin<2 else '🟡 ALERTA'} — Risco de Geada ({data_str})",
-                        "msg": f"Temperatura mínima prevista: {tmin:.1f}°C. Proteja culturas sensíveis imediatamente."})
-                if pd.notna(pp) and pp > 40:
-                    nivel = "vermelho" if pp > 80 else "amarelo"
-                    alertas.append({"nivel": nivel, "icone": "⛈️",
-                        "titulo": f"{'🔴' if pp>80 else '🟡'} Chuva Intensa ({data_str})",
-                        "msg": f"{pp:.0f} mm acumulados. Risco de enxurrada, erosão e encharcamento."})
-                if raj is not None and pd.notna(raj) and raj > 60:
-                    alertas.append({"nivel":"vermelho","icone":"💨",
-                        "titulo": f"🔴 Rajada de Vento Forte ({data_str})",
-                        "msg": f"Rajada prevista: {raj:.0f} km/h. Risco de danos a culturas e estruturas."})
-                if cape is not None and pd.notna(cape) and cape > 1500:
-                    alertas.append({"nivel":"vermelho","icone":"⚡",
-                        "titulo": f"🔴 Risco de Tempestade Severa ({data_str})",
-                        "msg": f"CAPE: {cape:.0f} J/kg. Alta energia convectiva disponível. Risco de granizo e raios."})
-            except Exception:
-                continue
-
-        dias_secos = int((df_daily[("precipitation","sum")] < 1).sum())
-        if dias_secos >= 5:
-            alertas.append({"nivel":"amarelo","icone":"🌵",
-                "titulo": f"🟡 Veranico — {dias_secos} dias consecutivos sem chuva significativa",
-                "msg": "Déficit hídrico crescente. Monitore umidade do solo e intensifique a irrigação."})
-    except Exception:
-        pass
-
-    if not alertas:
-        alertas.append({"nivel":"verde","icone":"✅",
-            "titulo": "🟢 Condições meteorológicas favoráveis",
-            "msg": "Nenhum alerta ativo para as próximas 72 horas. Condições adequadas para operações de campo."})
-    return alertas
-
-
-def calcular_balanco_hidrico(df: pd.DataFrame, cad_mm: float = CAD_PADRAO_MM) -> dict:
-    if df.empty:
-        return {}
-    try:
-        df_d = df.resample("D").agg({"precipitation": "sum"}).head(7)
-        eto_lista = []
-        for dia in df_d.index:
-            try:
-                sub  = df[df.index.date == dia.date()]
-                tmax = sub["temperature_2m"].max()
-                tmin = sub["temperature_2m"].min()
-                ra   = sub.get("shortwave_radiation", pd.Series(dtype=float)).mean()
-                if pd.isna(ra) or ra == 0: ra = 200
-                eto = 0.0023 * max(0, tmax - tmin)**0.5 * ((tmax + tmin) / 2 + 17.8) * (ra / 2450)
-                eto_lista.append(max(0, float(eto)))
-            except Exception:
-                eto_lista.append(3.5)
-
-        arm = cad_mm * 0.5
-        resultados = []
-        for eto, pp in zip(eto_lista, df_d["precipitation"].fillna(0)):
-            bal = float(pp) - eto
-            if bal >= 0:
-                arm_n = min(arm + bal, cad_mm)
-                exc, def_, etr = arm + bal - arm_n, 0.0, eto
-            else:
-                arm_n = max(0.0, arm * np.exp(bal / max(cad_mm, 1)))
-                exc = 0.0
-                etr = float(pp) + (arm - arm_n)
-                def_ = eto - etr
-            resultados.append({"arm": round(arm_n,2), "def": round(def_,2),
-                                "exc": round(exc,2),  "etr": round(etr,2),
-                                "eto": round(eto,2),  "pp":  round(float(pp),2)})
-            arm = arm_n
-
-        if not resultados:
-            return {}
-        hoje    = resultados[0]
-        arm_pct = round(hoje["arm"] / cad_mm * 100, 1) if cad_mm > 0 else 0
-        if arm_pct >= 70:
-            rec, nivel = "✅ Solo bem suprido. Irrigação dispensável.", "verde"
-        elif arm_pct >= 40:
-            rec, nivel = f"💧 Aplicar {hoje['def']*1.1:.1f} mm para repor o déficit hídrico.", "amarelo"
+    bloco = cur = 0
+    bloco_inicio = bloco_fim = None
+    cur_inicio = None
+    for t, row in df_def.iterrows():
+        if row["status"] == "aberta":
+            if cur == 0: cur_inicio = t
+            cur += 1
+            if cur > bloco:
+                bloco = cur
+                bloco_inicio = cur_inicio
+                bloco_fim    = t
         else:
-            rec, nivel = f"🚿 Déficit crítico: {hoje['def']:.1f} mm. Irrigação urgente.", "vermelho"
+            cur = 0
 
-        return {"arm_mm": hoje["arm"], "arm_pct": arm_pct, "def_mm": hoje["def"],
-                "etr_mm": hoje["etr"], "eto_mm": hoje["eto"], "pp_mm": hoje["pp"],
-                "cad_mm": cad_mm, "recomendacao": rec, "nivel": nivel, "serie": resultados}
-    except Exception:
-        return {}
+    n_irr = int((df_irr["status_irr"] == "irrigar").sum())
+    n_atn = int((df_irr["status_irr"] == "atencao").sum())
+
+    return {
+        "def_abertas":    n_ab,
+        "def_parciais":   n_pa,
+        "def_bloqueadas": n_bl,
+        "def_bloco_h":    bloco,
+        "def_bloco_ini":  bloco_inicio,
+        "def_bloco_fim":  bloco_fim,
+        "irr_urgente":    n_irr,
+        "irr_atencao":    n_atn,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNÇÕES DE VISUALIZAÇÃO
+# FUNÇÕES DE GRÁFICO
 # ─────────────────────────────────────────────────────────────────────────────
-def _ax_base(ax):
-    ax.set_facecolor("#111827")
+
+def _ax_dark(ax):
+    ax.set_facecolor(BG_PANEL)
     ax.tick_params(colors="#9ca3af", labelsize=8)
     for sp in ax.spines.values():
         sp.set_edgecolor("#374151")
     ax.grid(True, color="#1f2937", linewidth=0.6, alpha=0.7)
 
 
-def fig_variavel_com_ic(df_main: pd.DataFrame, var: str,
-                         df_ic: pd.DataFrame = None) -> Figure:
-    fig, ax = plt.subplots(figsize=(12, 4), facecolor="#0d1117")
-    _ax_base(ax)
-    cor   = CORES_VAR.get(var, "#60a5fa")
-    label = LABELS_PT.get(var, var)
+def grafico_variavel(df: pd.DataFrame, var: str,
+                     df_ic: pd.DataFrame = None,
+                     titulo_extra: str = "") -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(13, 3.8), facecolor=BG_DARK)
+    _ax_dark(ax)
 
-    if var not in df_main.columns or df_main.empty:
-        ax.text(0.5, 0.5, "Dados não disponíveis", transform=ax.transAxes,
-                ha="center", va="center", color="white", fontsize=12)
+    cor   = CORES.get(var, "#60a5fa")
+    label = LABELS.get(var, var)
+
+    if var not in df.columns or df.empty:
+        ax.text(0.5, 0.5, "Dados não disponíveis",
+                transform=ax.transAxes, ha="center", va="center",
+                color="white", fontsize=12)
         return fig
 
-    serie = df_main[var].dropna()
-    x     = serie.index
+    serie = df[var].dropna()
 
     if df_ic is not None and not df_ic.empty:
-        ic_re = df_ic.reindex(x, method="nearest")
-        ax.fill_between(x, ic_re["ic95_low"], ic_re["ic95_high"],
-                        alpha=0.10, color=cor, label="IC 95%")
-        ax.fill_between(x, ic_re["ic68_low"], ic_re["ic68_high"],
-                        alpha=0.20, color=cor, label="IC 68%")
+        ic_re = df_ic.reindex(serie.index, method="nearest")
+        ax.fill_between(serie.index, ic_re["ic95_low"], ic_re["ic95_high"],
+                        alpha=0.08, color=cor, label="IC 95%")
+        ax.fill_between(serie.index, ic_re["ic68_low"], ic_re["ic68_high"],
+                        alpha=0.18, color=cor, label="IC 68%")
 
     if var == "precipitation":
-        ax.bar(x, serie.values, width=1/24, color=cor, alpha=0.8,
-               align="center", label=label)
+        ax.bar(serie.index, serie.values, width=1/24,
+               color=cor, alpha=0.82, align="center", label=label, zorder=5)
     else:
-        ax.plot(x, serie.values, color=cor, linewidth=2.0, label=label, zorder=5)
-        ax.fill_between(x, serie.values, alpha=0.10, color=cor)
+        ax.plot(serie.index, serie.values, color=cor,
+                linewidth=2.0, label=label, zorder=5)
+        ax.fill_between(serie.index, serie.values, alpha=0.09, color=cor)
 
-    limiares = {
-        "temperature_2m":      [(5,  "#60a5fa", "Risco geada (5°C)"),
-                                 (30, "#f97316", "Lim. defensivos (30°C)"),
-                                 (38, "#ef4444", "Estresse calor (38°C)")],
-        "windspeed_10m":       [(10, "#fbbf24", "Lim. defensivos (10 km/h)"),
-                                 (40, "#ef4444", "Dano potencial (40 km/h)")],
-        "relativehumidity_2m": [(55, "#f43f5e", "Lim. defensivos (55%)"),
-                                 (80, "#fb923c", "Risco ferrugem (80%)")],
-        "cape":                [(500,  "#fbbf24","CAPE fraco (500 J/kg)"),
-                                 (1500, "#f97316","CAPE moderado (1500 J/kg)"),
-                                 (2500, "#ef4444","CAPE alto (2500 J/kg)")],
+    LIMIARES = {
+        "temperature_2m": [
+            (5,           "#93c5fd", "Geada (5°C)"),
+            (DEF_TEMP_MAX,"#fbbf24", f"Lim. defensivos ({DEF_TEMP_MAX:.0f}°C)"),
+            (IRR_TEMP_ALTA,"#f97316",f"Estresse hídrico ({IRR_TEMP_ALTA:.0f}°C)"),
+            (38,          "#ef4444", "Calor extremo (38°C)"),
+        ],
+        "relativehumidity_2m": [
+            (DEF_UR_MIN,  "#fbbf24", f"Lim. defensivos ({DEF_UR_MIN:.0f}%)"),
+            (IRR_UR_BAIXA,"#fb923c", f"Irrig. atenção ({IRR_UR_BAIXA:.0f}%)"),
+            (IRR_UR_CRITICA,"#ef4444",f"Irrig. urgente ({IRR_UR_CRITICA:.0f}%)"),
+            (80,          "#c084fc", "Risco ferrugem (80%)"),
+        ],
+        "windspeed_10m": [
+            (DEF_VENTO_MAX,"#fbbf24",f"Lim. defensivos ({DEF_VENTO_MAX:.0f} km/h)"),
+            (40,           "#ef4444","Dano potencial (40 km/h)"),
+        ],
+        "precipitation": [
+            (10,  "#fbbf24","Atenção (10 mm/h)"),
+            (25,  "#ef4444","Intensidade forte (25 mm/h)"),
+        ],
+        "cape": [
+            (500,  "#fbbf24","CAPE moderado (500 J/kg)"),
+            (1500, "#f97316","CAPE alto (1500 J/kg)"),
+            (2500, "#ef4444","CAPE extremo (2500 J/kg)"),
+        ],
+        "et0_fao_evapotranspiration": [
+            (IRR_ETO_ALTA, "#fb923c",f"ETo atenção ({IRR_ETO_ALTA:.2f} mm/h)"),
+            (0.40,         "#ef4444","ETo elevada (0.40 mm/h)"),
+        ],
     }
-    for lim_val, lim_cor, lim_label in limiares.get(var, []):
-        ax.axhline(lim_val, color=lim_cor, linewidth=0.9,
-                   linestyle="--", alpha=0.7, label=lim_label)
+    for val, cor_l, lbl in LIMIARES.get(var, []):
+        ax.axhline(val, color=cor_l, linewidth=0.9,
+                   linestyle="--", alpha=0.75, label=lbl)
 
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%Hh"))
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
     ax.set_ylabel(label, color="#9ca3af", fontsize=9)
-    ax.set_title(label, color="white", fontsize=10, fontweight="bold", pad=8)
+    titulo = f"{label}{titulo_extra}"
+    ax.set_title(titulo, color="white", fontsize=10, fontweight="bold", pad=8)
 
-    handles, labels_leg = ax.get_legend_handles_labels()
-    ax.legend(handles, labels_leg, fontsize=7, facecolor="#111827",
-              labelcolor="white", edgecolor="#374151", loc="upper right")
-    plt.tight_layout(pad=0.5)
-    return fig
-
-
-def fig_multiplas_variaveis(df: pd.DataFrame, vars_list: list) -> Figure:
-    n = len(vars_list)
-    if n == 0:
-        return None
-    fig, axes = plt.subplots(n, 1, figsize=(12, 3.2*n), facecolor="#0d1117", sharex=True)
-    if n == 1:
-        axes = [axes]
-    for ax, var in zip(axes, vars_list):
-        _ax_base(ax)
-        cor = CORES_VAR.get(var, "#60a5fa")
-        lbl = LABELS_PT.get(var, var)
-        if var not in df.columns:
-            ax.text(0.5, 0.5, f"{lbl} — sem dados", transform=ax.transAxes,
-                    ha="center", va="center", color="#9ca3af", fontsize=9)
-            continue
-        serie = df[var].dropna()
-        if var == "precipitation":
-            ax.bar(serie.index, serie.values, width=1/24, color=cor, alpha=0.85)
-        else:
-            ax.plot(serie.index, serie.values, color=cor, linewidth=1.8)
-            ax.fill_between(serie.index, serie.values, alpha=0.10, color=cor)
-        ax.set_ylabel(lbl, color="#9ca3af", fontsize=8)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%Hh"))
-        ax.xaxis.set_major_locator(mdates.HourLocator(interval=12))
-    plt.tight_layout(pad=0.5)
-    return fig
-
-
-def fig_matriz_alertas(df_main: pd.DataFrame) -> Figure:
-    if df_main.empty:
-        return None
-    df24  = df_main.head(24).copy()
-    n_h   = min(24, len(df24))
-    horas = [df24.index[i].strftime("%Hh") for i in range(n_h)]
-
-    temp_h = df24.get("temperature_2m",      pd.Series(25, index=df24.index))
-    ur_h   = df24.get("relativehumidity_2m", pd.Series(70, index=df24.index))
-    vt_h   = df24.get("windspeed_10m",       pd.Series(5,  index=df24.index))
-    pp_h   = df24.get("precipitation",       pd.Series(0,  index=df24.index))
-
-    colunas = ["Temp (°C)", "UR (%)", "Vento\n(km/h)", "Chuva\n(mm)",
-               "Ferrugem", "Brusone", "Janela\nDefens."]
-    matriz  = np.zeros((n_h, len(colunas)))
-
-    for i in range(n_h):
-        t  = float(temp_h.iloc[i]) if i < len(temp_h) and pd.notna(temp_h.iloc[i]) else 25
-        ur = float(ur_h.iloc[i])   if i < len(ur_h)   and pd.notna(ur_h.iloc[i])   else 70
-        vt = float(vt_h.iloc[i])   if i < len(vt_h)   and pd.notna(vt_h.iloc[i])   else 5
-        pp = float(pp_h.iloc[i])   if i < len(pp_h)   and pd.notna(pp_h.iloc[i])   else 0
-
-        matriz[i, 0] = 0 if t < 30 else 2
-        matriz[i, 1] = 0 if ur > 55 else 2
-        matriz[i, 2] = 0 if vt < 10 else (1 if vt < 15 else 2)
-        matriz[i, 3] = 0 if pp == 0 else (1 if pp < 2 else 2)
-        matriz[i, 4] = 2 if (15 <= t <= 30 and ur > 80) else 0
-        matriz[i, 5] = 2 if (20 <= t <= 28 and ur > 90) else 0
-        ok_cnt = (t < 30) + (ur > 55) + (vt < 10) + (pp == 0)
-        matriz[i, 6] = 0 if ok_cnt == 4 else (1 if ok_cnt == 3 else 2)
-
-    cmap = mcolors.ListedColormap(["#22c55e", "#fbbf24", "#ef4444"])
-    norm = mcolors.BoundaryNorm([0, 0.5, 1.5, 2.5], cmap.N)
-
-    fig, ax = plt.subplots(figsize=(12, max(6, n_h * 0.30)), facecolor="#0d1117")
-    ax.set_facecolor("#0d1117")
-    ax.imshow(matriz, cmap=cmap, norm=norm, aspect="auto")
-    ax.set_xticks(range(len(colunas)))
-    ax.set_xticklabels(colunas, fontsize=8.5, color="white", fontweight="bold")
-    ax.set_yticks(range(n_h))
-    ax.set_yticklabels(horas, fontsize=7, color="#9ca3af")
-    ax.set_title("Matriz de Risco Hora × Variável — Próximas 24h",
-                 color="white", fontsize=11, fontweight="bold", pad=10)
-
-    for i in range(n_h):
-        for j in range(len(colunas)):
-            val = matriz[i, j]
-            txt = "✓" if val == 0 else ("!" if val == 1 else "✗")
-            ax.text(j, i, txt, ha="center", va="center",
-                    fontsize=7.5, color="#000", fontweight="bold")
-
-    p_verde  = mpatches.Patch(facecolor="#22c55e", label="✓ Favorável / OK")
-    p_amar   = mpatches.Patch(facecolor="#fbbf24", label="! Atenção")
-    p_verm   = mpatches.Patch(facecolor="#ef4444", label="✗ Risco / Bloqueado")
-    ax.legend(handles=[p_verde, p_amar, p_verm],
-              loc="lower right", fontsize=8, facecolor="#111827",
+    handles, labs = ax.get_legend_handles_labels()
+    ax.legend(handles, labs, fontsize=7, facecolor=BG_PANEL,
               labelcolor="white", edgecolor="#374151",
-              bbox_to_anchor=(1.0, -0.08))
-    for sp in ax.spines.values():
-        sp.set_visible(False)
-    plt.tight_layout(pad=0.8)
+              loc="upper right", ncol=2)
+    plt.tight_layout(pad=0.5)
     return fig
 
 
-def fig_confianca_modelos(ensemble: dict, var: str) -> Figure:
+def grafico_spread(ensemble: dict, var: str) -> plt.Figure:
     series = {}
     for mod, dados in ensemble.items():
         if "hourly" in dados and var in dados["hourly"]:
             s = pd.Series(
                 pd.to_numeric(dados["hourly"][var], errors="coerce"),
                 index=pd.to_datetime(dados["hourly"]["time"]),
-                name=MODELOS_OPENMETEO.get(mod, mod),
+                name={"gfs_seamless":"GFS","icon_seamless":"ICON",
+                      "best_match":"Best Match"}.get(mod, mod),
             )
-            series[MODELOS_OPENMETEO.get(mod, mod)] = s
+            series[s.name] = s
     if len(series) < 2:
         return None
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), facecolor="#0d1117",
-                                    gridspec_kw={"height_ratios": [3, 1]})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 5.5),
+                                    facecolor=BG_DARK,
+                                    gridspec_kw={"height_ratios":[3,1]})
     for ax in [ax1, ax2]:
-        _ax_base(ax)
+        _ax_dark(ax)
 
-    colors_mod = ["#60a5fa", "#f97316", "#34d399", "#a78bfa"]
-    df_all = pd.concat(series.values(), axis=1)
-    media  = df_all.mean(axis=1)
-    std    = df_all.std(axis=1)
-    cv     = (std / (media.abs() + 1e-6) * 100)
+    df_e  = pd.concat(series.values(), axis=1)
+    med   = df_e.mean(axis=1)
+    std   = df_e.std(axis=1)
+    cv    = (std / (med.abs() + 1e-6) * 100)
+    cores_mod = ["#60a5fa","#f97316","#34d399"]
 
-    ax1.fill_between(media.index, media - 2*std, media + 2*std,
-                     alpha=0.10, color="#60a5fa", label="IC 95%")
-    ax1.fill_between(media.index, media - std, media + std,
-                     alpha=0.20, color="#60a5fa", label="IC 68%")
-    for (nome, s), cor in zip(series.items(), colors_mod):
-        ax1.plot(s.index, s.values, color=cor, linewidth=1.2,
-                 alpha=0.8, label=nome, linestyle="--")
-    ax1.plot(media.index, media.values, color="white", linewidth=2.2,
-             label="Média dos modelos", zorder=5)
-    ax1.set_ylabel(LABELS_PT.get(var, var), color="#9ca3af", fontsize=9)
+    ax1.fill_between(med.index, med-2*std, med+2*std, alpha=0.09, color="#60a5fa", label="IC 95%")
+    ax1.fill_between(med.index, med-std,   med+std,   alpha=0.18, color="#60a5fa", label="IC 68%")
+    for (nome, s), c in zip(series.items(), cores_mod):
+        ax1.plot(s.index, s.values, color=c, linewidth=1.3,
+                 alpha=0.85, linestyle="--", label=nome)
+    ax1.plot(med.index, med.values, color="white",
+             linewidth=2.2, label="Média modelos", zorder=5)
+    ax1.set_ylabel(LABELS.get(var, var), color="#9ca3af", fontsize=9)
     ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%Hh"))
     ax1.xaxis.set_major_locator(mdates.HourLocator(interval=12))
-    ax1.legend(fontsize=7, facecolor="#111827", labelcolor="white",
-               edgecolor="#374151", loc="upper right", ncol=2)
-    ax1.set_title(f"Spread entre modelos — {LABELS_PT.get(var, var)}",
+    ax1.legend(fontsize=7, facecolor=BG_PANEL, labelcolor="white",
+               edgecolor="#374151", loc="upper right", ncol=3)
+    ax1.set_title(f"Spread entre modelos — {LABELS.get(var,var)}",
                   color="white", fontsize=10, fontweight="bold")
 
-    cv_colors = ["#22c55e" if v < 10 else ("#fbbf24" if v < 25 else "#ef4444")
-                 for v in cv.values]
-    ax2.bar(cv.index, cv.values, width=1/24, color=cv_colors, alpha=0.85)
-    ax2.axhline(10, color="#22c55e", linestyle="--", linewidth=0.8, alpha=0.6, label="Alta (<10%)")
-    ax2.axhline(25, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.6, label="Baixa (>25%)")
+    cv_c = ["#22c55e" if v<10 else ("#fbbf24" if v<25 else "#ef4444") for v in cv.values]
+    ax2.bar(cv.index, cv.values, width=1/24, color=cv_c, alpha=0.85)
+    ax2.axhline(10, color="#22c55e", linestyle="--", linewidth=0.8, alpha=0.7, label="Alta (<10%)")
+    ax2.axhline(25, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7, label="Baixa (>25%)")
     ax2.set_ylabel("CV % (incerteza)", color="#9ca3af", fontsize=8)
     ax2.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     ax2.xaxis.set_major_locator(mdates.DayLocator())
-    ax2.legend(fontsize=7, facecolor="#111827", labelcolor="white",
-               edgecolor="#374151", loc="upper right")
+    ax2.legend(fontsize=7, facecolor=BG_PANEL, labelcolor="white", edgecolor="#374151")
+
     plt.tight_layout(pad=0.5)
     return fig
 
 
-def df_previsao_display(df: pd.DataFrame) -> pd.DataFrame:
+def grafico_matriz_defensivos(df_def: pd.DataFrame) -> plt.Figure:
+    n = min(24, len(df_def))
+    if n == 0:
+        return None
+
+    colunas_crit = ["Vento\n<10km/h", "Temp\n<30°C", "UR\n≥55%", "Sem\nChuva", "JANELA\nGERAL"]
+    horas = [df_def.index[i].strftime("%Hh") for i in range(n)]
+    M = np.zeros((n, len(colunas_crit)))
+
+    for i, (_, row) in enumerate(df_def.head(n).iterrows()):
+        M[i,0] = row["vento_ok"]
+        M[i,1] = row["temp_ok"]
+        M[i,2] = row["ur_ok"]
+        M[i,3] = row["chuva_ok"]
+        M[i,4] = 1 if row["status"]=="aberta" else (0.5 if row["status"]=="parcial" else 0)
+
+    cmap = mcolors.ListedColormap(["#ef4444","#fbbf24","#22c55e"])
+    norm = mcolors.BoundaryNorm([-0.1, 0.3, 0.7, 1.1], cmap.N)
+
+    fig, ax = plt.subplots(figsize=(10, max(5, n*0.30)), facecolor=BG_DARK)
+    ax.set_facecolor(BG_DARK)
+    ax.imshow(M, cmap=cmap, norm=norm, aspect="auto")
+
+    ax.set_xticks(range(len(colunas_crit)))
+    ax.set_xticklabels(colunas_crit, color="white", fontsize=8.5, fontweight="bold")
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(horas, color="#9ca3af", fontsize=7)
+    ax.set_title("Janela de Aplicação de Defensivos — Próximas 24h",
+                 color="white", fontsize=11, fontweight="bold", pad=10)
+
+    for i in range(n):
+        for j in range(len(colunas_crit)):
+            val = M[i, j]
+            txt = "✓" if val == 1 else ("○" if val == 0.5 else "✗")
+            ax.text(j, i, txt, ha="center", va="center",
+                    fontsize=8, color="#000", fontweight="bold")
+
+    p_v = mpatches.Patch(facecolor="#22c55e", label="✓ Critério atendido / Janela aberta")
+    p_a = mpatches.Patch(facecolor="#fbbf24", label="○ Parcial (1 restrição)")
+    p_r = mpatches.Patch(facecolor="#ef4444", label="✗ Critério bloqueado")
+    ax.legend(handles=[p_v,p_a,p_r], loc="lower right", fontsize=7.5,
+              facecolor=BG_PANEL, labelcolor="white", edgecolor="#374151",
+              bbox_to_anchor=(1.0,-0.06))
+    for sp in ax.spines.values(): sp.set_visible(False)
+    plt.tight_layout(pad=0.8)
+    return fig
+
+
+def grafico_matriz_irrigacao(df_irr: pd.DataFrame) -> plt.Figure:
+    n = min(48, len(df_irr))
+    if n == 0:
+        return None
+
+    colunas = ["UR\n(%)", "Temperatura\n(°C)", "ETo\n(mm/h)", "NECESSIDADE\nIRRIGAÇÃO"]
+    horas   = [df_irr.index[i].strftime("%d/%m\n%Hh") for i in range(n)]
+
+    M = np.zeros((n, 4))
+    for i, (_, row) in enumerate(df_irr.head(n).iterrows()):
+        M[i,0] = 2 - row["ur_nivel"]
+        M[i,1] = 2 - row["tmp_nivel"]
+        M[i,2] = 2 - row["eto_nivel"]
+        M[i,3] = 2 - row["nivel_max"]
+
+    cmap = mcolors.ListedColormap(["#ef4444","#fbbf24","#22c55e"])
+    norm = mcolors.BoundaryNorm([-0.1, 0.7, 1.3, 2.1], cmap.N)
+
+    fig, ax = plt.subplots(figsize=(9, max(6, n*0.22)), facecolor=BG_DARK)
+    ax.set_facecolor(BG_DARK)
+    ax.imshow(M, cmap=cmap, norm=norm, aspect="auto")
+
+    ax.set_xticks(range(4))
+    ax.set_xticklabels(colunas, color="white", fontsize=8.5, fontweight="bold")
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(horas, color="#9ca3af", fontsize=6.5)
+    ax.set_title("Necessidade de Irrigação — Próximas 48h (parâmetros EMBRAPA)",
+                 color="white", fontsize=11, fontweight="bold", pad=10)
+
+    TEXTS = {2:"✓", 1:"!", 0:"✗"}
+    for i in range(n):
+        for j in range(4):
+            txt = TEXTS.get(int(round(M[i,j])), "?")
+            ax.text(j, i, txt, ha="center", va="center",
+                    fontsize=7.5, color="#000", fontweight="bold")
+
+    p_v = mpatches.Patch(facecolor="#22c55e", label="✓ Sem necessidade")
+    p_a = mpatches.Patch(facecolor="#fbbf24", label="! Atenção — monitorar")
+    p_r = mpatches.Patch(facecolor="#ef4444", label="✗ Irrigar urgente")
+    ax.legend(handles=[p_v,p_a,p_r], loc="lower right", fontsize=7.5,
+              facecolor=BG_PANEL, labelcolor="white", edgecolor="#374151",
+              bbox_to_anchor=(1.0,-0.04))
+    for sp in ax.spines.values(): sp.set_visible(False)
+    plt.tight_layout(pad=0.8)
+    return fig
+
+
+def df_para_exibir(df: pd.DataFrame, max_rows: int = 168) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
-    cols_show = {k: v for k, v in LABELS_PT.items() if k in df.columns}
-    df_disp   = df[list(cols_show.keys())].copy()
-    df_disp.columns = [cols_show[c] for c in df_disp.columns]
-    df_disp.index   = df_disp.index.strftime("%d/%m %Hh")
-    df_disp.index.name = "Data/Hora"
-    if "Código de Tempo (WMO)" in df_disp.columns:
-        df_disp["Condição"] = df_disp["Código de Tempo (WMO)"].apply(
-            lambda x: WCODE_MAP.get(int(x), f"Cód {int(x)}") if pd.notna(x) else "—")
-        df_disp.drop(columns=["Código de Tempo (WMO)"], inplace=True)
-    return df_disp.round(1)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAPA FOLIUM
-# ─────────────────────────────────────────────────────────────────────────────
-def criar_mapa(lat_sel: float, lon_sel: float) -> folium.Map:
-    m = folium.Map(
-        location=[-20.5, -54.5],
-        zoom_start=7,
-        tiles="OpenStreetMap",
-        control_scale=True,
-    )
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri World Imagery",
-        name="🛰️ Satélite",
-        overlay=False,
-        control=True,
-    ).add_to(m)
-
-    for nome, (lat, lon) in CIDADES_MAPA.items():
-        folium.CircleMarker(
-            location=[lat, lon], radius=5,
-            color=VERDE_MEDIO, fill=True,
-            fill_color=VERDE_MEDIO, fill_opacity=0.6,
-            tooltip=f"🏙️ {nome} ({lat:.4f}, {lon:.4f})",
-            popup=folium.Popup(
-                f"<b>{nome}</b><br><small>Clique em qualquer ponto para selecionar</small>",
-                max_width=180,
-            ),
-        ).add_to(m)
-
-    folium.Marker(
-        location=[lat_sel, lon_sel],
-        popup=f"<b>📌 Ponto de Análise</b><br>Lat: {lat_sel:.4f}<br>Lon: {lon_sel:.4f}",
-        tooltip=f"📌 Análise: ({lat_sel:.4f}, {lon_sel:.4f})",
-        icon=folium.Icon(color="red", icon="star", prefix="fa"),
-    ).add_to(m)
-
-    folium.Rectangle(
-        bounds=[[-23.67, -57.65], [-17.16, -50.92]],
-        color=VERDE_MEDIO, fill=False, weight=1.5,
-        dash_array="6", tooltip="Mato Grosso do Sul",
-    ).add_to(m)
-
-    folium.LayerControl().add_to(m)
-    return m
+    cols = {k: v for k, v in LABELS.items() if k in df.columns}
+    out  = df[list(cols.keys())].head(max_rows).copy()
+    out.columns = [cols[c] for c in out.columns]
+    out.index   = out.index.strftime("%d/%m %Hh")
+    out.index.name = "Data/Hora"
+    wc_col = LABELS.get("weathercode")
+    if wc_col in out.columns:
+        out["Condição"] = out[wc_col].apply(
+            lambda x: WCODE.get(int(x), f"Cód {x}") if pd.notna(x) else "—")
+        out.drop(columns=[wc_col], inplace=True)
+    return out.round(2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # E-MAIL
 # ─────────────────────────────────────────────────────────────────────────────
-def gerar_html_relatorio(lat, lon, df, alertas, riscos, bh, janelas_list, nome_local="") -> str:
-    agora = datetime.now().strftime("%d/%m/%Y às %H:%M")
-    loc   = nome_local or f"{abs(lat):.4f}°S, {abs(lon):.4f}°W"
 
-    def card(titulo, valor, cor="#1B4D2E"):
-        return (f"<div style='flex:1;min-width:110px;background:#fff;border-radius:10px;"
-                f"border-top:4px solid {cor};padding:12px 10px;box-shadow:0 2px 8px rgba(0,0,0,0.08);text-align:center;'>"
-                f"<div style='font-size:11px;color:#777;'>{titulo}</div>"
-                f"<div style='font-size:20px;font-weight:bold;color:#222;'>{valor}</div></div>")
-
-    cards = ""
-    if not df.empty:
-        try:
-            cards += card("🌡 Temp Atual",   f"{df['temperature_2m'].iloc[0]:.1f}°C", "#e65100")
-            cards += card("🌧 Chuva 24h",    f"{df['precipitation'].iloc[:24].sum():.1f}mm", "#1565c0")
-            cards += card("💧 UR Atual",     f"{df['relativehumidity_2m'].iloc[0]:.0f}%", "#0277bd")
-            cards += card("💨 Vento",        f"{df['windspeed_10m'].iloc[0]:.0f}km/h", "#6a1b9a")
-        except Exception:
-            pass
-
-    _cor_al = {"verde":"#e8f5e9","amarelo":"#fff8e1","vermelho":"#ffebee"}
-    _brd_al = {"verde":"#43a047","amarelo":"#fbc02d","vermelho":"#e53935"}
-    html_alertas = ""
-    for al in alertas:
-        bg  = _cor_al.get(al["nivel"], "#f5f5f5")
-        brd = _brd_al.get(al["nivel"], "#9e9e9e")
-        html_alertas += (f"<div style='background:{bg};border-left:5px solid {brd};"
-                         f"border-radius:6px;padding:10px 14px;margin:5px 0;'>"
-                         f"<b>{al['icone']} {al['titulo']}</b><br>"
-                         f"<span style='font-size:12px;'>{al['msg']}</span></div>")
-
-    html_riscos = ""
-    for r in riscos.values():
-        bg  = _cor_al.get(r["cor"], "#f5f5f5")
-        brd = _brd_al.get(r["cor"], "#9e9e9e")
-        html_riscos += (f"<div style='background:{bg};border-left:5px solid {brd};"
-                        f"border-radius:6px;padding:10px 14px;margin:5px 0;'>"
-                        f"<b>{r['emoji']} {r['doenca']} — Risco {r['nivel']}</b><br>"
-                        f"<span style='font-size:12px;'>{r['horas_consecutivas']}h consecutivas favoráveis "
-                        f"(limiar: {r['limiar']}h) | Ref.: {r['referencia']}</span></div>")
-
-    bh_html = ""
-    if bh:
-        bh_html = (f"<p style='font-size:13px;'>ARM: {bh.get('arm_mm',0):.1f}mm "
-                   f"({bh.get('arm_pct',0):.0f}% CAD) | Déficit: {bh.get('def_mm',0):.1f}mm<br>"
-                   f"<b>Recomendação:</b> {bh.get('recomendacao','—')}</p>")
-
-    n_ab = sum(1 for j in janelas_list if j.get("status") == "aberta")
-    n_bl = sum(1 for j in janelas_list if j.get("status") == "bloqueada")
-
-    return f"""<html><body style='font-family:Arial,sans-serif;background:#f0f2f5;padding:20px;margin:0;'>
-  <div style='max-width:720px;margin:auto;background:#fff;border-radius:14px;box-shadow:0 4px 18px rgba(0,0,0,.12);overflow:hidden;'>
-    <div style='background:linear-gradient(135deg,#1B4D2E,#3DA63A);padding:28px 32px;text-align:center;'>
-      <h1 style='color:white;margin:0;font-size:22px;'>🌿 Yamada Engenharia</h1>
-      <p style='color:rgba(255,255,255,0.85);margin:6px 0 0;font-size:14px;'>Relatório Agroclimático — {loc}</p>
-    </div>
-    <div style='padding:28px 32px;'>
-      <p style='color:#777;font-size:12px;'>Gerado em {agora}</p>
-      <h3 style='color:#1B4D2E;border-bottom:2px solid #3DA63A;padding-bottom:6px;'>📊 Condições Atuais</h3>
-      <div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:22px;'>{cards}</div>
-      <h3 style='color:#1B4D2E;border-bottom:2px solid #3DA63A;padding-bottom:6px;'>⚠️ Alertas</h3>
-      {html_alertas}
-      <h3 style='color:#1B4D2E;border-bottom:2px solid #3DA63A;padding-bottom:6px;margin-top:20px;'>🍂 Risco Fitossanitário</h3>
-      {html_riscos}
-      <h3 style='color:#1B4D2E;border-bottom:2px solid #3DA63A;padding-bottom:6px;margin-top:20px;'>🧪 Janela de Defensivos (24h)</h3>
-      <p style='font-size:13px;'>✅ Horas ideais: <b>{n_ab}</b> | ❌ Horas bloqueadas: <b>{n_bl}</b></p>
-      <h3 style='color:#1B4D2E;border-bottom:2px solid #3DA63A;padding-bottom:6px;margin-top:20px;'>💧 Balanço Hídrico</h3>
-      {bh_html}
-      <p style='color:#bbb;font-size:10px;margin-top:28px;border-top:1px solid #eee;padding-top:12px;text-align:center;'>
-        Dados: Open-Meteo (GFS/ICON/ERA5) · NASA POWER · INPE<br>
-        CAD padrão 65mm (solo médio/franco, EMBRAPA) · MVP v4.2 · {agora}
-      </p>
-    </div>
-  </div>
-</body></html>"""
-
-
-def enviar_email(html: str, assunto: str, extras: list = None) -> tuple:
-    if not _email_ok:
-        return False, "E-mail não configurado nos secrets.toml"
+def enviar_email(assunto: str, corpo_html: str, destinatarios: list) -> tuple[bool, str]:
+    if not _EMAIL_OK:
+        return False, "Credenciais de e-mail não configuradas em st.secrets."
     try:
-        dests = list(EMAIL_DESTINATARIOS)
-        if extras:
-            dests += [e for e in extras if "@" in e and e not in dests]
-        msg = MIMEMultipart("mixed")
+        msg = MIMEMultipart("alternative")
         msg["Subject"] = assunto
-        msg["From"]    = EMAIL_REMETENTE
-        msg["To"]      = ", ".join(dests)
-        alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(html, "html"))
-        msg.attach(alt)
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
-            srv.login(EMAIL_REMETENTE, st.secrets["email"]["senha_app"])
-            srv.sendmail(EMAIL_REMETENTE, dests, msg.as_string())
-        return True, f"Enviado para {', '.join(dests)}"
+        msg["From"]    = _EMAIL_REM
+        msg["To"]      = ", ".join(destinatarios)
+        msg.attach(MIMEText(corpo_html, "html", "utf-8"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(_EMAIL_REM, _EMAIL_PASS)
+            s.sendmail(_EMAIL_REM, destinatarios, msg.as_string())
+        return True, f"E-mail enviado para: {', '.join(destinatarios)}"
     except Exception as e:
         return False, str(e)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# INTERFACE PRINCIPAL
-# ─────────────────────────────────────────────────────────────────────────────
-def main():
+def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
+                          res: dict, agora: str) -> str:
+    def _v(col, fmt="{:.1f}"):
+        if df.empty or col not in df.columns: return "—"
+        val = df[col].dropna()
+        return fmt.format(val.iloc[0]) if not val.empty else "—"
 
-    # ── Header ──────────────────────────────────────────────────────────────
+    temp_atual   = _v("temperature_2m")
+    ur_atual     = _v("relativehumidity_2m", "{:.0f}")
+    vento_atual  = _v("windspeed_10m", "{:.0f}")
+    precip_24h   = (f"{df['precipitation'].head(24).sum():.1f}" 
+                    if not df.empty and "precipitation" in df.columns else "—")
+    wc           = int(df["weathercode"].dropna().iloc[0]) if (not df.empty and "weathercode" in df.columns and len(df["weathercode"].dropna()) > 0) else 0
+    condicao     = WCODE.get(wc, "—")
+
+    bloco_str = "—"
+    if res.get("def_bloco_ini") and res.get("def_bloco_fim"):
+        bloco_str = (f"{res['def_bloco_ini'].strftime('%Hh %d/%m')} → "
+                     f"{res['def_bloco_fim'].strftime('%Hh %d/%m')} "
+                     f"({res['def_bloco_h']}h consecutivas)")
+
+    irr_status = "🔴 Irrigação urgente" if res.get("irr_urgente",0) > 0 else (
+                 "🟡 Atenção à irrigação" if res.get("irr_atencao",0) > 0 else "🟢 Sem necessidade")
+
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f7f4;padding:24px;">
+    <div style="max-width:680px;margin:auto;background:white;border-radius:12px;overflow:hidden;
+                box-shadow:0 4px 20px rgba(0,0,0,0.1);">
+      <div style="background:linear-gradient(135deg,#1B4D2E,#3DA63A);padding:24px 32px;">
+        <h1 style="color:white;margin:0;font-size:1.4rem;">🌿 Yamada Engenharia</h1>
+        <p style="color:rgba(255,255,255,0.8);margin:4px 0 0 0;font-size:0.85rem;">
+          Boletim Agrometeorólogico — {agora}</p>
+      </div>
+      <div style="padding:24px 32px;">
+        <h2 style="color:#1B4D2E;font-size:1.1rem;border-bottom:2px solid #3DA63A;padding-bottom:6px;">
+          📍 {fazenda}</h2>
+        <p style="color:#555;font-size:0.85rem;">Cultura: {info['cultura']} | Área: {info['area_ha']:,} ha
+          | Lat {info['lat']:.3f}° Lon {info['lon']:.3f}°</p>
+
+        <h3 style="color:#1B4D2E;margin-top:20px;">🌡️ Condições Atuais</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+          <tr style="background:#f0f7f0;">
+            <td style="padding:8px 12px;"><b>Temperatura</b></td><td>{temp_atual} °C</td>
+            <td style="padding:8px 12px;"><b>Umidade Relativa</b></td><td>{ur_atual} %</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;"><b>Vento</b></td><td>{vento_atual} km/h</td>
+            <td style="padding:8px 12px;"><b>Precipitação 24h</b></td><td>{precip_24h} mm</td>
+          </tr>
+          <tr style="background:#f0f7f0;">
+            <td style="padding:8px 12px;" colspan="4"><b>Condição:</b> {condicao}</td>
+          </tr>
+        </table>
+
+        <h3 style="color:#1B4D2E;margin-top:20px;">🌿 Defensivos (24h) — MAPA/EMBRAPA</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+          <tr style="background:#f0f7f0;">
+            <td style="padding:8px 12px;"><b>Horas abertas</b></td>
+            <td style="color:#16a34a;font-weight:bold;">{res.get('def_abertas',0)}h</td>
+            <td style="padding:8px 12px;"><b>Horas parciais</b></td>
+            <td style="color:#d97706;font-weight:bold;">{res.get('def_parciais',0)}h</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;" colspan="2"><b>Melhor janela contínua</b></td>
+            <td style="padding:8px 12px;" colspan="2">{bloco_str}</td>
+          </tr>
+        </table>
+
+        <h3 style="color:#1B4D2E;margin-top:20px;">💧 Irrigação (48h) — EMBRAPA</h3>
+        <p style="font-size:0.9rem;">{irr_status} —
+          {res.get('irr_urgente',0)} horas críticas · {res.get('irr_atencao',0)} horas de atenção</p>
+
+        <hr style="border-color:#ddd;margin:20px 0;">
+        <p style="font-size:0.75rem;color:#999;">
+          Fonte: Open-Meteo (GFS+ICON) · Parâmetros EMBRAPA/MAPA Portaria 371/2020<br>
+          Yamada Engenharia Agronômica — Mato Grosso do Sul</p>
+      </div>
+    </div></body></html>
+    """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
+
+with st.sidebar:
     st.markdown("""
-    <div class="yamada-header">
-      <h1>🌿 Yamada Engenharia</h1>
-      <p>Plataforma de Monitoramento Agroclimático — Mato Grosso do Sul</p>
-      <p style="font-size:0.75rem;color:rgba(255,255,255,0.5);">
-        Open-Meteo (GFS · ICON · ERA5) · NASA POWER · INPE · v4.2
-      </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SIDEBAR
-    # ─────────────────────────────────────────────────────────────────────────
-    with st.sidebar:
-        st.markdown("""
-        <div style="text-align:center;padding:8px 0 18px;">
-          <div style="font-family:'Montserrat',sans-serif;font-weight:900;
-                      font-size:1.15rem;color:#a5d6a7;">YAMADA</div>
-          <div style="font-size:0.7rem;color:#81c784;letter-spacing:2px;">ENGENHARIA</div>
-        </div>""", unsafe_allow_html=True)
-        st.markdown("---")
-
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
-                    'font-size:0.88rem;">📍 COORDENADAS DO PONTO</p>',
-                    unsafe_allow_html=True)
-        st.caption("Digite manualmente ou clique no mapa abaixo.")
-
-        lat_input = st.number_input(
-            "Latitude", value=float(st.session_state["lat_sel"]),
-            min_value=-23.8, max_value=-17.0, step=0.0001, format="%.4f",
-            key="lat_input_num",
-            help="Latitudes válidas para o MS: -23.8 a -17.0")
-
-        lon_input = st.number_input(
-            "Longitude", value=float(st.session_state["lon_sel"]),
-            min_value=-57.8, max_value=-50.8, step=0.0001, format="%.4f",
-            key="lon_input_num",
-            help="Longitudes válidas para o MS: -57.8 a -50.8")
-
-        coords_changed = (
-            abs(lat_input - st.session_state["lat_sel"]) > 0.0001 or
-            abs(lon_input - st.session_state["lon_sel"]) > 0.0001
-        )
-        if coords_changed:
-            st.session_state["lat_sel"]   = round(lat_input, 4)
-            st.session_state["lon_sel"]   = round(lon_input, 4)
-            st.session_state["analisado"] = False
-
-        st.markdown(
-            f'<div class="status-ponto">'
-            f'<span style="color:#a5d6a7;font-size:0.78rem;">Ponto selecionado</span><br>'
-            f'<span style="color:#ffffff;font-weight:700;font-size:0.9rem;">'
-            f'{abs(st.session_state["lat_sel"]):.4f}°S &nbsp;|&nbsp; '
-            f'{abs(st.session_state["lon_sel"]):.4f}°W</span>'
-            f'</div>',
-            unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
-                    'font-size:0.88rem;">⚙️ CONFIGURAÇÕES</p>',
-                    unsafe_allow_html=True)
-
-        modelo_sel = st.selectbox(
-            "Modelo meteorológico",
-            list(MODELOS_OPENMETEO.keys()),
-            format_func=lambda k: MODELOS_OPENMETEO[k],
-            index=0, label_visibility="collapsed",
-            help="Best Match usa ensemble ponderado. GFS e ICON têm boa performance no Centro-Oeste.")
-
-        dias_prev = st.slider(
-            "Horizonte de previsão (dias)", 3, 7, 7,
-            help="Confiabilidade decresce significativamente após D+4.")
-
-        calcular_ic = st.checkbox(
-            "Calcular IC multi-modelo (+30s)",
-            value=True,
-            help="Faixa de incerteza via spread GFS/ICON/Best Match (Buizza et al. 2005)")
-
-        st.markdown("---")
-
-        st.markdown('<p style="font-family:Montserrat;font-weight:700;color:#a5d6a7;'
-                    'font-size:0.88rem;">📧 E-MAIL</p>',
-                    unsafe_allow_html=True)
-        if _email_ok:
-            st.caption(f"✅ {', '.join(EMAIL_DESTINATARIOS)}")
-        else:
-            st.caption("⚠️ Configure [email] no secrets.toml")
-        st.markdown("---")
-
-        botao_analise = st.button("🚀  GERAR ANÁLISE", use_container_width=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # MAPA INTERATIVO
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown('<div class="secao-titulo">🗺️ Selecione o Ponto de Análise no Mapa</div>',
-                unsafe_allow_html=True)
-    st.caption(
-        "**Clique em qualquer ponto** do Mato Grosso do Sul para definir as coordenadas. "
-        "Os marcadores verdes indicam cidades de referência. "
-        "Após selecionar, clique em **GERAR ANÁLISE** na barra lateral.")
-
-    mapa    = criar_mapa(st.session_state["lat_sel"], st.session_state["lon_sel"])
-    map_out = st_folium(mapa, width="100%", height=430,
-                         returned_objects=["last_clicked"],
-                         key="mapa_principal")
-
-    # Atualiza coordenadas a partir do clique no mapa
-    # IMPORTANTE: apenas atualiza o session_state e para — NÃO busca dados aqui
-    if map_out and map_out.get("last_clicked"):
-        clk = map_out["last_clicked"]
-        lat_c = round(clk["lat"], 4)
-        lon_c = round(clk["lng"], 4)
-        if -24.2 <= lat_c <= -16.8 and -58.2 <= lon_c <= -50.5:
-            if (abs(lat_c - st.session_state["lat_sel"]) > 0.001 or
-                    abs(lon_c - st.session_state["lon_sel"]) > 0.001):
-                st.session_state["lat_sel"]   = lat_c
-                st.session_state["lon_sel"]   = lon_c
-                st.session_state["analisado"] = False
-                st.rerun()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # GATILHO DE ANÁLISE — toda a coleta de dados fica AQUI dentro
-    # ─────────────────────────────────────────────────────────────────────────
-    if botao_analise:
-        st.session_state["analisado"]   = True
-        st.session_state["lat_used"]    = st.session_state["lat_sel"]
-        st.session_state["lon_used"]    = st.session_state["lon_sel"]
-        st.session_state["modelo_used"] = modelo_sel
-        st.session_state["dias_used"]   = dias_prev
-
-        # ── Camada 1: coordenadas arredondadas (evita cache miss por décimos) ──
-        lat_r = round(st.session_state["lat_sel"], 2)
-        lon_r = round(st.session_state["lon_sel"], 2)
-
-        # ── Camada 2: chave de guarda (evita re-fetch para o mesmo ponto) ──
-        fetch_key = (lat_r, lon_r, modelo_sel, dias_prev, calcular_ic)
-
-        if st.session_state.get("dados_buscados_key") != fetch_key:
-            # ── Camada 3: dados buscados UMA ÚNICA VEZ, dentro do botão ──
-            progresso = st.progress(0, text="Inicializando coleta de dados...")
-
-            progresso.progress(10, text=f"🌤 Coletando Open-Meteo ({MODELOS_OPENMETEO[modelo_sel]})...")
-            dados_raw = buscar_openmeteo(lat_r, lon_r, modelo_sel, dias_prev)
-
-            if "_erro" in dados_raw:
-                st.error(f"❌ Erro ao acessar Open-Meteo: {dados_raw['_erro']}")
-                st.session_state["analisado"] = False
-                st.stop()
-
-            df_main = openmeteo_para_df(dados_raw)
-            if df_main.empty:
-                st.error("❌ Nenhum dado retornado pela API. Verifique as coordenadas.")
-                st.session_state["analisado"] = False
-                st.stop()
-
-            progresso.progress(30, text="📊 Calculando ensemble multi-modelo...")
-            ensemble_raw = {}
-            df_ic_cache  = {}
-            if calcular_ic:
-                ensemble_raw = buscar_ensemble_openmeteo(lat_r, lon_r, dias_prev)
-                for v in ["temperature_2m","precipitation","relativehumidity_2m","windspeed_10m"]:
-                    df_ic_cache[v] = calcular_intervalo_confianca(ensemble_raw, v)
-
-            progresso.progress(55, text="☀️ Consultando NASA POWER (solo/radiação)...")
-            dados_nasa = buscar_nasa_power(lat_r, lon_r)
-
-            progresso.progress(70, text="🔥 Consultando INPE Queimadas...")
-            df_focos = buscar_focos_inpe()
-
-            progresso.progress(82, text="📐 Processando análises agronômicas...")
-            janelas_df = calcular_janelas_defensivos(df_main)
-            riscos     = calcular_risco_fitossanitario(df_main)
-            alertas    = calcular_alertas_meteo(df_main, st.session_state["lat_used"])
-            bh         = calcular_balanco_hidrico(df_main, CAD_PADRAO_MM)
-
-            progresso.progress(100, text="✅ Análise concluída!")
-
-            # Persiste tudo no session_state
-            st.session_state["dados_raw"]          = dados_raw
-            st.session_state["df_main"]            = df_main
-            st.session_state["ensemble_raw"]       = ensemble_raw
-            st.session_state["df_ic_cache"]        = df_ic_cache
-            st.session_state["dados_nasa"]         = dados_nasa
-            st.session_state["df_focos"]           = df_focos
-            st.session_state["janelas_df"]         = janelas_df
-            st.session_state["riscos"]             = riscos
-            st.session_state["alertas"]            = alertas
-            st.session_state["bh"]                 = bh
-            st.session_state["dados_buscados_key"] = fetch_key
-
-        # Se a chave já bate, apenas usa o que está no session_state (zero requisições)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Bloco de exibição — apenas lê do session_state, nunca chama APIs
-    # ─────────────────────────────────────────────────────────────────────────
-    if not st.session_state["analisado"]:
-        st.markdown("""
-        <div class="alert-azul" style="margin-top:16px;">
-          <b>👆 Como usar esta plataforma:</b><br>
-          <span style="font-size:0.88rem;">
-            1. Clique em um ponto no mapa ou informe as coordenadas manualmente na barra lateral.<br>
-            2. Escolha o modelo meteorológico e o horizonte de previsão.<br>
-            3. Clique em <b>🚀 GERAR ANÁLISE</b> para obter o relatório completo.
-          </span>
-        </div>""", unsafe_allow_html=True)
-        st.stop()
-
-    # Lê os dados do session_state para o restante da renderização
-    lat        = st.session_state.get("lat_used", st.session_state["lat_sel"])
-    lon        = st.session_state.get("lon_used", st.session_state["lon_sel"])
-    modelo_sel = st.session_state.get("modelo_used", modelo_sel)
-    dias_prev  = st.session_state.get("dias_used",   dias_prev)
-    df_main    = st.session_state["df_main"]
-    ensemble_raw = st.session_state["ensemble_raw"]
-    df_ic_cache  = st.session_state["df_ic_cache"]
-    dados_nasa   = st.session_state["dados_nasa"]
-    df_focos     = st.session_state["df_focos"]
-    janelas_df   = st.session_state["janelas_df"]
-    riscos       = st.session_state["riscos"]
-    alertas      = st.session_state["alertas"]
-    bh           = st.session_state["bh"]
-
-    # Segurança: se df_main for None (sessão recarregada sem análise), pede nova análise
-    if df_main is None or (isinstance(df_main, pd.DataFrame) and df_main.empty):
-        st.warning("⚠️ Dados não encontrados. Clique em **GERAR ANÁLISE** para carregar.")
-        st.stop()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # BANNER DO PONTO ANALISADO
-    # ─────────────────────────────────────────────────────────────────────────
-    wc_atual = ""
-    if "weathercode" in df_main.columns and not df_main.empty:
-        wc = df_main["weathercode"].dropna()
-        if not wc.empty:
-            wc_atual = WCODE_MAP.get(int(wc.iloc[0]), "")
-
-    st.markdown(f"""
-    <div style="background:linear-gradient(90deg,{VERDE_ESCURO},{VERDE_MEDIO});
-                border-radius:10px;padding:14px 22px;margin:16px 0 20px 0;">
-      <span style="color:white;font-family:Montserrat;font-weight:700;font-size:1.1rem;">
-        📍 {abs(lat):.4f}°S, {abs(lon):.4f}°W
-      </span>
-      <span style="color:rgba(255,255,255,0.7);font-size:0.82rem;margin-left:14px;">
-        Modelo: {MODELOS_OPENMETEO[modelo_sel]} · {dias_prev} dias ·
-        {datetime.now().strftime('%d/%m/%Y %H:%M')} · {wc_atual}
-      </span>
+    <div style='text-align:center;padding:12px 0 8px 0;'>
+      <span style='font-size:2rem;'>🌿</span><br>
+      <span style='font-family:Montserrat,sans-serif;font-weight:900;font-size:1rem;
+                   color:#a5d6a7;letter-spacing:1px;'>YAMADA</span><br>
+      <span style='font-size:0.7rem;color:#81c784;'>ENGENHARIA AGRONÔMICA</span>
     </div>""", unsafe_allow_html=True)
+    st.markdown("---")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # MÉTRICAS RÁPIDAS
-    # ─────────────────────────────────────────────────────────────────────────
-    try:
-        c1,c2,c3,c4,c5,c6 = st.columns(6)
-        with c1: st.metric("🌡 Temperatura",
-                            f"{df_main['temperature_2m'].iloc[0]:.1f}°C")
-        with c2: st.metric("🌧 Chuva 24h",
-                            f"{df_main['precipitation'].iloc[:24].sum():.1f} mm")
-        with c3: st.metric("💧 Umidade",
-                            f"{df_main['relativehumidity_2m'].iloc[0]:.0f}%")
-        with c4: st.metric("💨 Vento",
-                            f"{df_main['windspeed_10m'].iloc[0]:.0f} km/h")
-        with c5:
-            rad_val = df_main.get("shortwave_radiation", pd.Series([0]))
-            st.metric("☀️ Radiação",
-                      f"{rad_val.iloc[0]:.0f} W/m²")
-        with c6:
-            cape_val = df_main.get("cape", pd.Series([0]))
-            st.metric("⚡ CAPE",
-                      f"{cape_val.iloc[0]:.0f} J/kg")
-    except Exception:
-        pass
+    nome_fazenda = st.selectbox("🏡 Fazenda", list(FAZENDAS.keys()), index=0)
+    info_faz     = FAZENDAS[nome_fazenda]
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # ABAS PRINCIPAIS
-    # ═════════════════════════════════════════════════════════════════════════
-    aba1, aba2, aba3, aba4, aba5 = st.tabs([
-        "📈 Previsão Meteorológica",
-        "🌡️ Climatologia & Solo",
-        "🌾 Síntese Agrícola",
-        "⚠️ Alertas & Risco",
-        "📧 Relatório & E-mail",
-    ])
+    modelo_key   = st.selectbox(
+        "🔭 Modelo Meteorológico",
+        list(MODELOS.keys()),
+        format_func=lambda k: MODELOS[k],
+        index=0,
+    )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ABA 1 — PREVISÃO METEOROLÓGICA HORÁRIA
-    # ─────────────────────────────────────────────────────────────────────────
-    with aba1:
-        st.markdown('<div class="secao-titulo">📈 Previsão Horária — Variáveis Meteorológicas</div>',
-                    unsafe_allow_html=True)
-        st.caption(
-            f"Modelo: **{MODELOS_OPENMETEO[modelo_sel]}** · Horizonte: {dias_prev} dias · "
-            "GFS validado para o Centro-Oeste (Souza et al. 2021); "
-            "ICON superior para convecção subtropical (Zängl et al. 2015)")
+    dias_prev    = st.slider("📅 Dias de previsão", 3, 7, 7)
 
-        vars_disponiveis = [v for v in VARIAVEIS_HORARIAS if v in df_main.columns]
-        var_escolhida = st.selectbox(
-            "Variável para gráfico detalhado (com intervalo de confiança):",
-            vars_disponiveis,
-            format_func=lambda v: LABELS_PT.get(v, v),
-            index=0,
-        )
-        df_ic_var = df_ic_cache.get(var_escolhida, pd.DataFrame())
-        fig_ic = fig_variavel_com_ic(df_main, var_escolhida, df_ic_var)
-        st.pyplot(fig_ic, use_container_width=True)
-        plt.close(fig_ic)
-
-        if df_ic_var is not None and not df_ic_var.empty:
-            cv_med = df_ic_var["cv_pct"].mean()
-            conf   = "Alta" if cv_med < 10 else ("Moderada" if cv_med < 25 else "Baixa")
-            cor_c  = "#22c55e" if conf=="Alta" else ("#fbbf24" if conf=="Moderada" else "#ef4444")
-            n_mod  = len([k for k,v in ensemble_raw.items() if "hourly" in v])
-            st.markdown(
-                f'<div class="alert-azul">'
-                f'<b>📊 Confiança da previsão — {LABELS_PT.get(var_escolhida,"")}:</b> '
-                f'<span style="color:{cor_c};font-weight:bold;">{conf}</span> '
-                f'(CV médio = {cv_med:.1f}%) — Spread entre {n_mod} modelos '
-                f'(GFS, ICON, Best Match). IC 68% = ±1σ; IC 95% = ±2σ '
-                f'(Buizza et al. 2005).</div>',
+    st.markdown("---")
+    st.markdown("<div class='secao-titulo' style='color:#a5d6a7;border-color:#3DA63A;'>🔧 Variáveis extras</div>",
                 unsafe_allow_html=True)
 
-        st.markdown('<div class="secao-titulo">📊 Painel Geral — Múltiplas Variáveis</div>',
-                    unsafe_allow_html=True)
-        vars_painel = st.multiselect(
-            "Selecione variáveis para o painel comparativo:",
-            vars_disponiveis,
-            default=[v for v in ["temperature_2m","precipitation",
-                                  "relativehumidity_2m","windspeed_10m"]
-                     if v in vars_disponiveis],
-            format_func=lambda v: LABELS_PT.get(v, v),
-        )
-        if vars_painel:
-            fig_multi = fig_multiplas_variaveis(df_main, vars_painel)
-            if fig_multi:
-                st.pyplot(fig_multi, use_container_width=True)
-                plt.close(fig_multi)
+    VARS_EXTRAS = {
+        "cape":                       "⚡ CAPE (tempestades)",
+        "shortwave_radiation":         "☀️ Radiação Solar",
+        "et0_fao_evapotranspiration":  "💧 ETo Penman-Monteith",
+        "soil_moisture_0_to_1cm":     "🌱 Umidade do Solo",
+        "surface_pressure":           "🔵 Pressão Superficial",
+        "cloudcover":                 "☁️ Cobertura de Nuvens",
+    }
+    vars_selecionadas = []
+    for v, lbl in VARS_EXTRAS.items():
+        if st.checkbox(lbl, value=(v in ["cape","et0_fao_evapotranspiration"]), key=f"chk_{v}"):
+            vars_selecionadas.append(v)
 
-        if ensemble_raw:
-            st.markdown(
-                '<div class="secao-titulo">🔬 Spread entre Modelos — Análise de Incerteza</div>',
-                unsafe_allow_html=True)
-            var_conf = st.selectbox(
-                "Variável para análise de spread entre modelos:",
-                [v for v in ["temperature_2m","precipitation",
-                              "relativehumidity_2m","windspeed_10m"]
-                 if v in df_main.columns],
-                format_func=lambda v: LABELS_PT.get(v, v),
-                index=0, key="sel_spread",
-            )
-            fig_conf = fig_confianca_modelos(ensemble_raw, var_conf)
-            if fig_conf:
-                st.pyplot(fig_conf, use_container_width=True)
-                plt.close(fig_conf)
-            st.caption(
-                "**CV < 10%** = Alta confiança  |  **10–25%** = Confiança moderada  |  "
-                "**> 25%** = Baixa confiança (elevada incerteza). "
-                "Metodologia: Goswami et al. (2010); Buizza et al. (2005).")
-
-        st.markdown('<div class="secao-titulo">🗃️ Dados Horários Completos</div>',
-                    unsafe_allow_html=True)
-        df_disp = df_previsao_display(df_main)
-        if not df_disp.empty:
-            st.dataframe(df_disp, use_container_width=True, height=320)
-            csv = df_disp.to_csv().encode("utf-8")
-            st.download_button(
-                "⬇️ Baixar CSV completo",
-                csv,
-                f"previsao_{abs(lat):.3f}S_{abs(lon):.3f}W_{datetime.now().strftime('%Y%m%d')}.csv",
-                "text/csv",
-            )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ABA 2 — CLIMATOLOGIA & SOLO
-    # ─────────────────────────────────────────────────────────────────────────
-    with aba2:
-        st.markdown('<div class="secao-titulo">📊 Estatísticas Descritivas do Período</div>',
-                    unsafe_allow_html=True)
-
-        if not df_main.empty:
-            vars_stat = [v for v in ["temperature_2m","relativehumidity_2m",
-                                      "windspeed_10m","precipitation",
-                                      "shortwave_radiation","cape"]
-                         if v in df_main.columns]
-            df_stat = df_main[vars_stat].describe().T
-            df_stat.index = [LABELS_PT.get(i, i) for i in df_stat.index]
-            df_stat = df_stat[["mean","std","min","max"]].round(2)
-            df_stat.columns = ["Média","Desvio Padrão","Mínimo","Máximo"]
-            st.dataframe(df_stat, use_container_width=True)
-
-            st.markdown('<div class="secao-titulo">🌡️ Distribuição de Temperatura no Período</div>',
-                        unsafe_allow_html=True)
-            temp_s = df_main["temperature_2m"].dropna()
-            if not temp_s.empty:
-                fig_t, ax_t = plt.subplots(figsize=(10, 3), facecolor="#0d1117")
-                _ax_base(ax_t)
-                ax_t.hist(temp_s.values, bins=32, color=CORES_VAR["temperature_2m"],
-                          alpha=0.8, edgecolor="none")
-                for p, cor, lbl in [(10,"#60a5fa","P10"),(50,"#fbbf24","P50"),(90,"#f43f5e","P90")]:
-                    v = float(np.percentile(temp_s, p))
-                    ax_t.axvline(v, color=cor, linewidth=1.5,
-                                 linestyle="--", label=f"{lbl}: {v:.1f}°C")
-                ax_t.set_xlabel("Temperatura (°C)", color="#9ca3af", fontsize=9)
-                ax_t.set_ylabel("Frequência (h)", color="#9ca3af", fontsize=9)
-                ax_t.legend(fontsize=8, facecolor="#111827", labelcolor="white", edgecolor="#374151")
-                ax_t.set_title("Distribuição de Temperatura — Período de Previsão",
-                               color="white", fontsize=10, fontweight="bold")
-                plt.tight_layout()
-                st.pyplot(fig_t, use_container_width=True)
-                plt.close(fig_t)
-
-            st.markdown('<div class="secao-titulo">🌧️ Precipitação Acumulada por Dia</div>',
-                        unsafe_allow_html=True)
-            pp_diario = df_main["precipitation"].resample("D").sum()
-            fig_pp, ax_pp = plt.subplots(figsize=(10, 3), facecolor="#0d1117")
-            _ax_base(ax_pp)
-            bar_cores = [VERDE_MEDIO if v < 20 else (AMARELO_ALERT if v < 50 else VERMELHO_ALRT)
-                         for v in pp_diario.values]
-            ax_pp.bar(range(len(pp_diario)), pp_diario.values,
-                      color=bar_cores, alpha=0.85, edgecolor="none")
-            ax_pp.set_xticks(range(len(pp_diario)))
-            ax_pp.set_xticklabels([d.strftime("%d/%m") for d in pp_diario.index],
-                                   color="#9ca3af", fontsize=8)
-            ax_pp.set_ylabel("Precipitação (mm)", color="#9ca3af", fontsize=9)
-            ax_pp.axhline(20, color=AMARELO_ALERT, linewidth=0.8, linestyle="--",
-                          alpha=0.7, label="20 mm (atenção)")
-            ax_pp.axhline(50, color=VERMELHO_ALRT, linewidth=0.8, linestyle="--",
-                          alpha=0.7, label="50 mm (alerta)")
-            ax_pp.legend(fontsize=8, facecolor="#111827", labelcolor="white", edgecolor="#374151")
-            ax_pp.set_title("Precipitação Acumulada Diária",
-                            color="white", fontsize=10, fontweight="bold")
-            plt.tight_layout()
-            st.pyplot(fig_pp, use_container_width=True)
-            plt.close(fig_pp)
-
-        st.markdown(
-            '<div class="secao-titulo">🌱 Umidade do Solo — NASA POWER (últimos 30 dias)</div>',
-            unsafe_allow_html=True)
-        if dados_nasa and "properties" in dados_nasa:
-            try:
-                params   = dados_nasa["properties"]["parameter"]
-                gwettop  = params.get("GWETTOP",  {})
-                gwetroot = params.get("GWETROOT", {})
-                if gwettop:
-                    datas_n = sorted(gwettop.keys())[-30:]
-                    vt = [float(gwettop.get(d,  0)) for d in datas_n]
-                    vr = [float(gwetroot.get(d, 0)) for d in datas_n]
-
-                    fig_s, ax_s = plt.subplots(figsize=(11, 3.5), facecolor="#0d1117")
-                    _ax_base(ax_s)
-                    ax_s.plot(range(len(vt)), vt, color="#66BB6A", linewidth=2.0,
-                              label="GWETTOP (0–5 cm — superfície)")
-                    ax_s.fill_between(range(len(vt)), vt, alpha=0.15, color="#66BB6A")
-                    ax_s.plot(range(len(vr)), vr, color="#42A5F5", linewidth=2.0,
-                              linestyle="--", label="GWETROOT (zona radicular)")
-                    ax_s.fill_between(range(len(vr)), vr, alpha=0.10, color="#42A5F5")
-                    ax_s.axhline(0.5, color="#FFB74D", linewidth=0.8, linestyle=":",
-                                 alpha=0.8, label="Capacidade de campo (0.5)")
-                    ax_s.axhline(0.2, color="#ef4444", linewidth=0.8, linestyle=":",
-                                 alpha=0.8, label="Ponto de murcha permanente (0.2)")
-                    ax_s.set_ylim(0, 1.05)
-                    ax_s.set_ylabel("Umidade relativa (fração 0–1)", color="#9ca3af", fontsize=9)
-                    step = max(1, len(datas_n) // 10)
-                    ax_s.set_xticks(range(0, len(datas_n), step))
-                    ax_s.set_xticklabels(
-                        [f"{datas_n[i][6:8]}/{datas_n[i][4:6]}"
-                         for i in range(0, len(datas_n), step)],
-                        color="#9ca3af", fontsize=8, rotation=30)
-                    ax_s.legend(fontsize=8, facecolor="#111827", labelcolor="white",
-                                edgecolor="#374151")
-                    ax_s.set_title("Umidade do Solo — NASA POWER",
-                                   color="white", fontsize=10, fontweight="bold")
-                    plt.tight_layout()
-                    st.pyplot(fig_s, use_container_width=True)
-                    plt.close(fig_s)
-
-                    df_solo = pd.DataFrame({
-                        "Data":             [f"{datas_n[i][6:8]}/{datas_n[i][4:6]}/{datas_n[i][:4]}"
-                                             for i in range(len(datas_n))],
-                        "GWETTOP (0–5cm)":  [round(v, 3) for v in vt],
-                        "GWETROOT (radicular)": [round(v, 3) for v in vr],
-                        "Status": ["✅ Adequado" if v > 0.5 else
-                                   ("⚠️ Atenção"   if v > 0.2 else "❌ Crítico") for v in vr],
-                    })
-                    st.dataframe(df_solo.tail(14), use_container_width=True, hide_index=True)
-            except Exception as e:
-                st.info(f"ℹ️ Dados NASA POWER indisponíveis nesta consulta: {e}")
-        else:
-            st.info("ℹ️ NASA POWER não respondeu. Verifique a conexão e tente novamente.")
-
-        st.markdown(
-            f'<div class="secao-titulo">💧 Balanço Hídrico — Thornthwaite-Mather</div>',
-            unsafe_allow_html=True)
-        st.caption(f"CAD = {CAD_PADRAO_MM:.0f} mm (solo médio/franco — padrão EMBRAPA para o MS). "
-                   "ETo estimada pelo método Hargreaves-Samani (1985).")
-
-        if bh:
-            c1,c2,c3,c4 = st.columns(4)
-            with c1: st.metric("ARM atual",    f"{bh['arm_mm']:.1f} mm",
-                               delta=f"{bh['arm_pct']:.0f}% da CAD")
-            with c2: st.metric("CAD",          f"{bh['cad_mm']:.0f} mm")
-            with c3: st.metric("Déficit hoje", f"{bh['def_mm']:.1f} mm",
-                               delta_color="inverse",
-                               delta="❌ déficit" if bh["def_mm"] > 0 else "✅ OK")
-            with c4: st.metric("ETo estimada", f"{bh['eto_mm']:.1f} mm/dia")
-
-            if "serie" in bh and bh["serie"]:
-                serie = bh["serie"][:7]
-                dias  = [f"D+{i}" for i in range(len(serie))]
-                fig_bh, (ax1, ax2) = plt.subplots(
-                    2, 1, figsize=(10, 5), facecolor="#0d1117",
-                    gridspec_kw={"height_ratios": [2, 1]})
-                for ax in [ax1, ax2]:
-                    _ax_base(ax)
-                arm_vals = [s["arm"] for s in serie]
-                def_vals = [s["def"] for s in serie]
-                exc_vals = [s["exc"] for s in serie]
-
-                ax1.fill_between(range(len(arm_vals)), arm_vals,
-                                 alpha=0.25, color="#42A5F5")
-                ax1.plot(range(len(arm_vals)), arm_vals,
-                         color="#42A5F5", linewidth=2, label="ARM (mm)")
-                ax1.axhline(bh["cad_mm"], color="#FFB74D", linewidth=1.2,
-                            linestyle="--", label=f"CAD = {bh['cad_mm']:.0f} mm")
-                ax1.axhline(bh["cad_mm"]*0.4, color="#ef4444", linewidth=0.9,
-                            linestyle=":", label="Limite crítico (40% CAD)")
-                ax1.set_ylabel("Armazenamento (mm)", color="#9ca3af", fontsize=9)
-                ax1.set_ylim(0, bh["cad_mm"] * 1.15)
-                ax1.set_xticks([])
-                ax1.legend(fontsize=8, facecolor="#111827", labelcolor="white",
-                           edgecolor="#374151")
-                ax1.set_title("Balanço Hídrico Thornthwaite-Mather",
-                              color="white", fontsize=10, fontweight="bold")
-
-                ax2.bar(range(len(def_vals)), def_vals,
-                        color="#ef4444", alpha=0.8, label="Déficit", width=0.42)
-                ax2.bar([i+0.44 for i in range(len(exc_vals))], exc_vals,
-                        color="#29B6F6", alpha=0.8, label="Excedente", width=0.42)
-                ax2.set_ylabel("mm", color="#9ca3af", fontsize=9)
-                ax2.set_xticks(range(len(dias)))
-                ax2.set_xticklabels(dias, color="#9ca3af", fontsize=8)
-                ax2.legend(fontsize=8, facecolor="#111827", labelcolor="white",
-                           edgecolor="#374151")
-                plt.tight_layout()
-                st.pyplot(fig_bh, use_container_width=True)
-                plt.close(fig_bh)
-
-            st.markdown(
-                f'<div class="alert-{bh["nivel"]}">'
-                f'<b>💧 Recomendação de Irrigação:</b> {bh["recomendacao"]}'
-                f'</div>',
-                unsafe_allow_html=True)
-        else:
-            st.warning("Balanço hídrico não pôde ser calculado com os dados disponíveis.")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ABA 3 — SÍNTESE AGRÍCOLA
-    # ─────────────────────────────────────────────────────────────────────────
-    with aba3:
-        st.markdown(
-            '<div class="secao-titulo">🌾 Síntese Agrícola — Resumo Executivo</div>',
-            unsafe_allow_html=True)
-        st.caption(
-            f"Análise consolidada para **{abs(lat):.4f}°S, {abs(lon):.4f}°W** · "
-            f"Gerada em {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-
-        col_s1, col_s2, col_s3 = st.columns(3)
-
-        with col_s1:
-            n_crit = sum(1 for a in alertas if a["nivel"] == "vermelho")
-            n_amar = sum(1 for a in alertas if a["nivel"] == "amarelo")
-            if n_crit > 0:
-                cond_geral, bg_cond = "🔴 Crítica",   "#ffebee"
-            elif n_amar > 0:
-                cond_geral, bg_cond = "🟡 Atenção",   "#fff8e1"
-            else:
-                cond_geral, bg_cond = "🟢 Favorável", "#e8f5e9"
-            st.markdown(
-                f'<div class="info-card" style="background:{bg_cond};">'
-                f'<h4>Condição Geral</h4>'
-                f'<p style="font-size:1.2rem;font-weight:700;">{cond_geral}</p>'
-                f'<p>{n_crit} alerta(s) crítico(s) · {n_amar} atenção(ões)</p>'
-                f'</div>', unsafe_allow_html=True)
-
-        with col_s2:
-            if janelas_df is not None and not janelas_df.empty:
-                n_ab  = int((janelas_df["status"] == "aberta").sum())
-                n_tot = len(janelas_df)
-                bloco = cur = 0
-                for v in (janelas_df["status"] == "aberta").values:
-                    if v: cur += 1; bloco = max(bloco, cur)
-                    else: cur = 0
-                cor_j = "#e8f5e9" if n_ab >= 8 else ("#fff8e1" if n_ab >= 4 else "#ffebee")
-                st.markdown(
-                    f'<div class="info-card" style="background:{cor_j};">'
-                    f'<h4>🧪 Janela de Defensivos (24h)</h4>'
-                    f'<p style="font-size:1.1rem;font-weight:700;">{n_ab}/{n_tot}h disponíveis</p>'
-                    f'<p>Bloco contínuo máximo: {bloco}h</p>'
-                    f'</div>', unsafe_allow_html=True)
-
-        with col_s3:
-            nivel_max = "Baixo"
-            for r in riscos.values():
-                if r["nivel"] == "Crítico": nivel_max = "Crítico"; break
-                if r["nivel"] == "Alto":    nivel_max = "Alto"
-                elif r["nivel"] == "Médio" and nivel_max == "Baixo":
-                    nivel_max = "Médio"
-            bg_fito = {"Crítico":"#ffebee","Alto":"#ffebee",
-                       "Médio":"#fff8e1","Baixo":"#e8f5e9"}.get(nivel_max,"#e8f5e9")
-            st.markdown(
-                f'<div class="info-card" style="background:{bg_fito};">'
-                f'<h4>🍂 Risco Fitossanitário</h4>'
-                f'<p style="font-size:1.1rem;font-weight:700;">Nível {nivel_max}</p>'
-                f'<p>Ferrugem: {riscos["ferrugem"]["nivel"]} · '
-                f'Brusone: {riscos["brusone"]["nivel"]}</p>'
-                f'</div>', unsafe_allow_html=True)
-
-        st.markdown("---")
-        st.markdown("### 📋 Relatório Narrativo Técnico")
-
-        if "temperature_2m" in df_main.columns:
-            tmax_v = df_main["temperature_2m"].resample("D").max().max()
-            tmin_v = df_main["temperature_2m"].resample("D").min().min()
-            tmed   = df_main["temperature_2m"].mean()
-            geada_txt = ("⚠️ **Risco de geada detectado** (Tmín < 5°C). "
-                         "Proteja culturas sensíveis imediatamente."
-                         if tmin_v < 5 else "Sem risco de geada no período.")
-            calor_txt = ("⚠️ **Calor extremo previsto** (>38°C). "
-                         "Estresse hídrico e fisiológico elevados."
-                         if tmax_v > 38 else "Sem ocorrência de calor extremo.")
-            st.markdown(
-                f'<div class="info-card"><h4>🌡️ Temperatura</h4>'
-                f'<p>Média do período: <b>{tmed:.1f}°C</b> · '
-                f'Máxima esperada: <b>{tmax_v:.1f}°C</b> · '
-                f'Mínima esperada: <b>{tmin_v:.1f}°C</b><br>'
-                f'{geada_txt} · {calor_txt}</p></div>',
-                unsafe_allow_html=True)
-
-        if "precipitation" in df_main.columns:
-            pp_total = df_main["precipitation"].sum()
-            pp_max   = df_main["precipitation"].resample("D").sum().max()
-            dias_ch  = int((df_main["precipitation"].resample("D").sum() > 1).sum())
-            if pp_max > 50:
-                pp_rec = "⚠️ Chuva intensa prevista (>50 mm/dia). Suspenda operações de campo."
-            elif pp_max > 20:
-                pp_rec = "⚠️ Volumes moderados previstos. Monitore possível encharcamento."
-            else:
-                pp_rec = "Precipitação dentro dos limites normais para operações agrícolas."
-            veranico = ("<br>🌵 <b>Atenção ao veranico:</b> poucos dias com chuva no período."
-                        if dias_ch < 2 and dias_prev >= 5 else "")
-            st.markdown(
-                f'<div class="info-card"><h4>🌧️ Precipitação</h4>'
-                f'<p>Total do período: <b>{pp_total:.1f} mm</b> · '
-                f'Máximo diário: <b>{pp_max:.1f} mm</b> · '
-                f'Dias com chuva: <b>{dias_ch}/{dias_prev}</b><br>'
-                f'{pp_rec}{veranico}</p></div>',
-                unsafe_allow_html=True)
-
-        if "windspeed_10m" in df_main.columns:
-            vt_med  = df_main["windspeed_10m"].mean()
-            gust_c  = df_main.get("windgusts_10m", df_main["windspeed_10m"])
-            vt_max  = gust_c.max()
-            h_vt_ok = int((df_main["windspeed_10m"].iloc[:24] < 10).sum())
-            raj_txt = ("⚠️ Rajadas fortes previstas. Risco de acamamento e danos a estruturas."
-                       if vt_max > 60 else "Condições de vento sem risco estrutural.")
-            st.markdown(
-                f'<div class="info-card"><h4>💨 Vento</h4>'
-                f'<p>Velocidade média: <b>{vt_med:.1f} km/h</b> · '
-                f'Rajada máxima: <b>{vt_max:.1f} km/h</b><br>'
-                f'Horas com vento adequado para defensivos (próximas 24h): '
-                f'<b>{h_vt_ok}h</b><br>{raj_txt}</p></div>',
-                unsafe_allow_html=True)
-
-        if bh:
-            st.markdown(
-                f'<div class="info-card"><h4>💧 Manejo de Irrigação</h4>'
-                f'<p>Armazenamento atual: <b>{bh["arm_mm"]:.1f} mm ({bh["arm_pct"]:.0f}% da CAD)</b><br>'
-                f'Déficit hoje: <b>{bh["def_mm"]:.1f} mm</b> · '
-                f'ETo estimada: <b>{bh["eto_mm"]:.2f} mm/dia</b><br>'
-                f'<b>Recomendação:</b> {bh["recomendacao"]}</p></div>',
-                unsafe_allow_html=True)
-
-        if janelas_df is not None and not janelas_df.empty:
-            abertas = janelas_df[janelas_df["status"] == "aberta"]
-            if not abertas.empty:
-                h_ini = abertas.index[0].strftime("%Hh")
-                h_fim = abertas.index[-1].strftime("%Hh")
-                st.markdown(
-                    f'<div class="info-card" style="background:#e8f5e9;">'
-                    f'<h4>🧪 Recomendação — Aplicação de Defensivos</h4>'
-                    f'<p>Janelas favoráveis identificadas entre <b>{h_ini}</b> e <b>{h_fim}</b> '
-                    f'(com possíveis intervalos).<br>'
-                    f'Critérios atendidos: vento &lt;10 km/h, temperatura &lt;30°C, '
-                    f'UR &gt;55%, sem precipitação.<br>'
-                    f'<i>Verifique sempre a bula do produto e condições locais no ato da aplicação.</i>'
-                    f'</p></div>',
-                    unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    '<div class="info-card" style="background:#ffebee;">'
-                    '<h4>🧪 Aplicação de Defensivos</h4>'
-                    '<p><b>Nenhuma janela ideal nas próximas 24h.</b> '
-                    'Adie as aplicações para o próximo período favorável.</p></div>',
-                    unsafe_allow_html=True)
-
-        for r in riscos.values():
-            if r["nivel"] != "Baixo":
-                st.markdown(
-                    f'<div class="alert-{r["cor"]}">'
-                    f'<b>{r["emoji"]} {r["doenca"]} — Risco {r["nivel"]}</b><br>'
-                    f'{r["horas_consecutivas"]}h consecutivas com condições favoráveis '
-                    f'(limiar: {r["limiar"]}h). Referência: {r["referencia"]}.'
-                    f'</div>',
-                    unsafe_allow_html=True)
-
-        st.markdown('<div class="secao-titulo">📅 Resumo Diário — Próximos 7 Dias</div>',
-                    unsafe_allow_html=True)
-        try:
-            agg_dict = {k: v for k, v in {
-                "temperature_2m":      ["max","min","mean"],
-                "precipitation":       "sum",
-                "relativehumidity_2m": "mean",
-                "windspeed_10m":       "max",
-                "shortwave_radiation": "mean",
-            }.items() if k in df_main.columns}
-            df_res = df_main.resample("D").agg(agg_dict).head(7)
-
-            cols_rename = {}
-            if "temperature_2m" in df_main.columns:
-                cols_rename.update({
-                    ("temperature_2m","max"):  "T.Máx (°C)",
-                    ("temperature_2m","min"):  "T.Mín (°C)",
-                    ("temperature_2m","mean"): "T.Méd (°C)",
-                })
-            if "precipitation" in df_main.columns:
-                cols_rename[("precipitation","sum")] = "Precip (mm)"
-            if "relativehumidity_2m" in df_main.columns:
-                cols_rename[("relativehumidity_2m","mean")] = "UR méd (%)"
-            if "windspeed_10m" in df_main.columns:
-                cols_rename[("windspeed_10m","max")] = "Vento máx (km/h)"
-            if "shortwave_radiation" in df_main.columns:
-                cols_rename[("shortwave_radiation","mean")] = "Rad. méd (W/m²)"
-
-            df_res.columns = [cols_rename.get(c, str(c)) for c in df_res.columns]
-            df_res.index   = [d.strftime("%a %d/%m") for d in df_res.index]
-            df_res = df_res.round(1)
-
-            if "weathercode" in df_main.columns:
-                wc_d = df_main["weathercode"].resample("D").max()
-                df_res["Condição"] = [
-                    WCODE_MAP.get(int(v), "—") if pd.notna(v) else "—"
-                    for v in wc_d.values[:7]
-                ]
-            st.dataframe(df_res, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Erro ao gerar tabela resumo: {e}")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ABA 4 — ALERTAS & RISCO
-    # ─────────────────────────────────────────────────────────────────────────
-    with aba4:
-        st.markdown('<div class="secao-titulo">⚠️ Alertas Meteorológicos</div>',
-                    unsafe_allow_html=True)
-        for al in alertas:
-            st.markdown(
-                f'<div class="alert-{al["nivel"]}">'
-                f'<b>{al["icone"]} {al["titulo"]}</b><br>'
-                f'<span style="font-size:0.9rem;">{al["msg"]}</span>'
-                f'</div>',
-                unsafe_allow_html=True)
-
-        st.markdown(
-            '<div class="secao-titulo">🔲 Matriz de Risco Hora × Variável (24h)</div>',
-            unsafe_allow_html=True)
-        st.caption("Verde ✓ = condição favorável | Amarelo ! = atenção | Vermelho ✗ = risco/bloqueado")
-        fig_mat = fig_matriz_alertas(df_main)
-        if fig_mat:
-            st.pyplot(fig_mat, use_container_width=True)
-            plt.close(fig_mat)
-
-        st.markdown(
-            '<div class="secao-titulo">🍂 Risco Fitossanitário Detalhado (48h)</div>',
-            unsafe_allow_html=True)
-        for r in riscos.values():
-            st.markdown(
-                f'<div class="alert-{r["cor"]}">'
-                f'<b>{r["emoji"]} {r["doenca"]} — Risco: {r["nivel"]}</b><br>'
-                f'<span style="font-size:0.88rem;">'
-                f'Horas consecutivas favoráveis: <b>{r["horas_consecutivas"]}h</b> '
-                f'(limiar de risco: {r["limiar"]}h) · '
-                f'Total de horas favoráveis nas 48h: {r["horas_total"]}h<br>'
-                f'Referência: <i>{r["referencia"]}</i>'
-                f'</span></div>',
-                unsafe_allow_html=True)
-
-        st.markdown(
-            '<div class="secao-titulo">📊 Evolução Temporal das Janelas de Risco (48h)</div>',
-            unsafe_allow_html=True)
-        fig_r, (ax_f, ax_b) = plt.subplots(2, 1, figsize=(12, 5),
-                                             facecolor="#0d1117", sharex=True)
-        for ax in [ax_f, ax_b]:
-            _ax_base(ax)
-        idx48 = df_main.index[:48]
-        fer_c = riscos["ferrugem"]["condicao"].reindex(idx48, fill_value=False)
-        bru_c = riscos["brusone"]["condicao"].reindex(idx48, fill_value=False)
-
-        ax_f.fill_between(idx48, fer_c.values.astype(float), color="#f97316",
-                          alpha=0.75, step="mid", label="Condição favorável — Ferrugem Asiática")
-        ax_f.set_ylabel("Ferrugem (0/1)", color="#9ca3af", fontsize=8)
-        ax_f.set_ylim(-0.05, 1.5)
-        ax_f.legend(fontsize=7, facecolor="#111827", labelcolor="white", edgecolor="#374151")
-        ax_f.set_title("Janelas de Risco Fitossanitário — 48h",
-                       color="white", fontsize=10, fontweight="bold")
-
-        ax_b.fill_between(idx48, bru_c.values.astype(float), color="#a78bfa",
-                          alpha=0.75, step="mid", label="Condição favorável — Brusone")
-        ax_b.set_ylabel("Brusone (0/1)", color="#9ca3af", fontsize=8)
-        ax_b.set_ylim(-0.05, 1.5)
-        ax_b.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%Hh"))
-        ax_b.xaxis.set_major_locator(mdates.HourLocator(interval=6))
-        ax_b.legend(fontsize=7, facecolor="#111827", labelcolor="white", edgecolor="#374151")
-        plt.tight_layout()
-        st.pyplot(fig_r, use_container_width=True)
-        plt.close(fig_r)
-
-        st.markdown(
-            '<div class="secao-titulo">🧪 Janela de Aplicação de Defensivos — 24h</div>',
-            unsafe_allow_html=True)
-        st.caption("**Critérios MAPA/Embrapa (Portaria 371/2020):** "
-                   "Vento < 10 km/h  ·  Temperatura < 30°C  ·  UR > 55%  ·  Sem precipitação")
-
-        if janelas_df is not None and not janelas_df.empty:
-            n_cols_j = min(24, len(janelas_df))
-            cols_j   = st.columns(n_cols_j)
-            for i, (idx_j, row_j) in enumerate(janelas_df.head(n_cols_j).iterrows()):
-                with cols_j[i]:
-                    emoji_j = {"aberta":"🟢","parcial":"🟡","bloqueada":"🔴"}[row_j["status"]]
-                    st.markdown(
-                        f"<div style='text-align:center;font-size:0.62rem;color:#555;'>"
-                        f"<b>{idx_j.strftime('%Hh')}</b><br>{emoji_j}</div>",
-                        unsafe_allow_html=True)
-
-            n_ab = int((janelas_df["status"]=="aberta").sum())
-            n_pa = int((janelas_df["status"]=="parcial").sum())
-            n_bl = int((janelas_df["status"]=="bloqueada").sum())
-            c1,c2,c3 = st.columns(3)
-            with c1: st.metric("✅ Horas ideais",    n_ab)
-            with c2: st.metric("⚠️ Horas parciais",  n_pa)
-            with c3: st.metric("❌ Horas bloqueadas", n_bl)
-
-            df_jan_disp = janelas_df[["status","motivo","n_restricoes"]].copy()
-            df_jan_disp.index   = [t.strftime("%Hh") for t in df_jan_disp.index]
-            df_jan_disp.columns = ["Status","Restrições","N° Restrições"]
-            df_jan_disp["Status"] = df_jan_disp["Status"].map(
-                {"aberta":"✅ Aberta","parcial":"⚠️ Parcial","bloqueada":"❌ Bloqueada"})
-            st.dataframe(df_jan_disp, use_container_width=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ABA 5 — RELATÓRIO & E-MAIL
-    # ─────────────────────────────────────────────────────────────────────────
-    with aba5:
-        st.markdown('<div class="secao-titulo">📧 Relatório por E-mail</div>',
-                    unsafe_allow_html=True)
-
-        if _email_ok:
-            st.markdown(
-                f'<div class="alert-verde">'
-                f'<b>✅ E-mail configurado</b><br>'
-                f'Remetente: {EMAIL_REMETENTE}<br>'
-                f'Destinatários: {", ".join(EMAIL_DESTINATARIOS)}'
-                f'</div>',
-                unsafe_allow_html=True)
-        else:
-            st.markdown(
-                '<div class="alert-amarelo">'
-                '<b>⚠️ E-mail não configurado</b><br>'
-                'Adicione ao <code>.streamlit/secrets.toml</code>:<br>'
-                '<code>[email]<br>remetente = "seu@gmail.com"<br>'
-                'senha_app = "sua_senha_app_gmail"<br>'
-                'destinatario = "destino@email.com"</code>'
-                '</div>',
-                unsafe_allow_html=True)
-
-        st.markdown("---")
-        dest_extra = st.text_input(
-            "Destinatários adicionais (separar por vírgula):",
-            placeholder="eng@fazenda.com, gestor@empresa.com")
-        extras = [e.strip() for e in dest_extra.split(",") if "@" in e] if dest_extra else []
-
-        col_e1, col_e2 = st.columns(2)
-        with col_e1:
-            if st.button("📤 Enviar Relatório Agora", use_container_width=True):
-                with st.spinner("Gerando e enviando relatório..."):
-                    html_rel = gerar_html_relatorio(
-                        lat, lon, df_main, alertas, riscos, bh,
-                        janelas_df.to_dict("records") if janelas_df is not None and not janelas_df.empty else [],
-                        f"{abs(lat):.4f}°S, {abs(lon):.4f}°W"
-                    )
-                    tem_crit = any(a["nivel"] == "vermelho" for a in alertas)
-                    assunto  = (
-                        f"{'🚨 ALERTA — ' if tem_crit else '📋 '}"
-                        f"Relatório Agroclimático — {abs(lat):.4f}°S, {abs(lon):.4f}°W | "
-                        f"{datetime.now().strftime('%d/%m/%Y %H:%M')}"
-                    )
-                    ok, msg = enviar_email(html_rel, assunto, extras)
-                if ok:
-                    st.success(f"✅ {msg}")
-                else:
-                    st.error(f"❌ {msg}")
-
-        with col_e2:
-            if st.button("👁 Pré-visualizar HTML", use_container_width=True):
-                html_prev = gerar_html_relatorio(
-                    lat, lon, df_main, alertas, riscos, bh,
-                    janelas_df.to_dict("records") if janelas_df is not None and not janelas_df.empty else [],
-                    f"{abs(lat):.4f}°S, {abs(lon):.4f}°W"
-                )
-                components.html(html_prev, height=680, scrolling=True)
-
-        st.markdown("---")
-        st.markdown("**📋 Conteúdo do relatório:**")
-        st.markdown(
-            "- 📊 Condições atuais (temperatura, chuva, umidade, vento, CAPE)\n"
-            "- ⚠️ Alertas meteorológicos com nível de severidade\n"
-            "- 🍂 Risco fitossanitário (Ferrugem Asiática e Brusone)\n"
-            "- 🧪 Janela de aplicação de defensivos — horas disponíveis nas 24h\n"
-            "- 💧 Balanço hídrico Thornthwaite-Mather e recomendação de irrigação\n"
-            "- 📅 Tabela de previsão detalhada para 7 dias"
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # RODAPÉ
-    # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown(f"""
-    <div style="text-align:center;padding:14px;color:#888;font-size:0.78rem;">
-      <b style="color:{VERDE_ESCURO};">Yamada Engenharia</b> — Meteorologia Aplicada ao Agronegócio · MS<br>
-      Open-Meteo (GFS · ICON · ERA5) · NASA POWER · INPE BDQueimadas · v4.2<br>
-      <i>Souza et al. (2021) · Zängl et al. (2015) · Hersbach et al. (2020) ·
-      Buizza et al. (2005) · Del Ponte et al. (2006) · Hargreaves & Samani (1985)</i><br>
-      {datetime.now().strftime('%d/%m/%Y %H:%M')}
+    <div class='info-card' style='background:#1a3d1c;border-color:#3DA63A;'>
+      <h4 style='color:#a5d6a7;'>📍 Localização</h4>
+      <p style='color:#e8f5e9;'>Lat: {info_faz['lat']:.3f}°<br>
+      Lon: {info_faz['lon']:.3f}°<br>
+      Área: {info_faz['area_ha']:,} ha<br>
+      Cultura: {info_faz['cultura']}</p>
     </div>""", unsafe_allow_html=True)
 
+    mostrar_spread = st.checkbox("📊 Comparar modelos (spread)", value=False)
 
-if __name__ == "__main__":
-    main()
+    if st.button("🔄 Atualizar dados"):
+        st.cache_data.clear()
+        st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HEADER PRINCIPAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+agora_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+st.markdown(f"""
+<div class="yamada-header">
+  <h1>🌿 Yamada Engenharia — Agrometeorologia MS</h1>
+  <p>Previsão Open-Meteo (GFS + ICON) · Parâmetros EMBRAPA/MAPA · Atualizado {agora_str}</p>
+</div>""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CARREGAMENTO DE DADOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+with st.spinner("⏳ Buscando previsão Open-Meteo…"):
+    dados_raw = buscar_previsao(info_faz["lat"], info_faz["lon"], modelo_key, dias_prev)
+    df_main   = json_para_df(dados_raw)
+
+if "_erro" in dados_raw:
+    st.error(f"❌ Erro na API Open-Meteo: {dados_raw['_erro']}")
+    st.stop()
+
+if df_main.empty:
+    st.error("❌ Dados não disponíveis. Verifique a conexão e tente novamente.")
+    st.stop()
+
+# Ensemble para IC (lazy)
+ensemble_data: dict = {}
+df_ic_temp = df_ic_precip = df_ic_ur = df_ic_vento = pd.DataFrame()
+
+if mostrar_spread:
+    with st.spinner("⏳ Buscando ensemble de modelos…"):
+        ensemble_data = buscar_ensemble(info_faz["lat"], info_faz["lon"], dias_prev)
+    df_ic_temp   = ic_entre_modelos(ensemble_data, "temperature_2m")
+    df_ic_precip = ic_entre_modelos(ensemble_data, "precipitation")
+    df_ic_ur     = ic_entre_modelos(ensemble_data, "relativehumidity_2m")
+    df_ic_vento  = ic_entre_modelos(ensemble_data, "windspeed_10m")
+
+# Cálculos EMBRAPA
+df_def = calcular_janela_defensivos(df_main)
+df_irr = calcular_janela_irrigacao(df_main)
+res    = resumo_janelas(df_def, df_irr)
+
+# Condição atual
+wc_atual   = int(df_main["weathercode"].dropna().iloc[0]) if "weathercode" in df_main.columns and len(df_main["weathercode"].dropna()) > 0 else 0
+temp_agora = df_main["temperature_2m"].dropna().iloc[0] if "temperature_2m" in df_main.columns else float("nan")
+ur_agora   = df_main["relativehumidity_2m"].dropna().iloc[0] if "relativehumidity_2m" in df_main.columns else float("nan")
+vento_agora= df_main["windspeed_10m"].dropna().iloc[0] if "windspeed_10m" in df_main.columns else float("nan")
+precip_24h = df_main["precipitation"].head(24).sum() if "precipitation" in df_main.columns else 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MÉTRICAS RÁPIDAS
+# ─────────────────────────────────────────────────────────────────────────────
+
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("🌡️ Temperatura", f"{temp_agora:.1f} °C")
+c2.metric("💧 Umidade Relativa", f"{ur_agora:.0f} %")
+c3.metric("🌬️ Vento", f"{vento_agora:.0f} km/h")
+c4.metric("🌧️ Precip. 24h", f"{precip_24h:.1f} mm")
+c5.metric("🌤️ Condição", WCODE.get(wc_atual, f"Cód {wc_atual}"))
+
+st.markdown("---")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ABAS
+# ─────────────────────────────────────────────────────────────────────────────
+
+tabs = st.tabs([
+    "⭐ Síntese",
+    "🌧️ Precipitação",
+    "🌡️ Temperatura",
+    "💧 Umidade",
+    "🌬️ Vento",
+    "📄 Relatório",
+])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 0 — SÍNTESE
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tabs[0]:
+    st.markdown("<div class='secao-titulo'>📋 Síntese Operacional</div>", unsafe_allow_html=True)
+
+    # Cards de resumo
+    col_a, col_b, col_c, col_d = st.columns(4)
+
+    # Defensivos
+    pct_ab = res["def_abertas"] / 24 * 100
+    if res["def_abertas"] >= 6:
+        cls_d = "alert-verde"
+        icn_d = "🟢"
+    elif res["def_abertas"] >= 2:
+        cls_d = "alert-amarelo"
+        icn_d = "🟡"
+    else:
+        cls_d = "alert-vermelho"
+        icn_d = "🔴"
+
+    col_a.markdown(f"""
+    <div class='{cls_d}'>
+      <b>{icn_d} Defensivos — Abertas</b><br>
+      <span style='font-size:1.6rem;font-weight:900;'>{res['def_abertas']}h</span>
+      <span style='font-size:0.8rem;'> / 24h ({pct_ab:.0f}%)</span>
+    </div>""", unsafe_allow_html=True)
+
+    col_b.markdown(f"""
+    <div class='alert-amarelo'>
+      <b>🟡 Defensivos — Parciais</b><br>
+      <span style='font-size:1.6rem;font-weight:900;'>{res['def_parciais']}h</span>
+      <span style='font-size:0.8rem;'> / 24h</span>
+    </div>""", unsafe_allow_html=True)
+
+    # Melhor bloco
+    if res["def_bloco_ini"] and res["def_bloco_h"] > 0:
+        bloco_txt = (f"{res['def_bloco_ini'].strftime('%Hh')} → "
+                     f"{res['def_bloco_fim'].strftime('%Hh')} "
+                     f"({res['def_bloco_h']}h)")
+    else:
+        bloco_txt = "Sem janela contínua"
+    col_c.markdown(f"""
+    <div class='alert-azul'>
+      <b>📅 Melhor janela contínua</b><br>
+      <span style='font-size:0.95rem;font-weight:700;'>{bloco_txt}</span>
+    </div>""", unsafe_allow_html=True)
+
+    # Irrigação
+    if res["irr_urgente"] > 0:
+        cls_i = "alert-vermelho"; icn_i = "🔴"
+        irr_txt = f"Irrigar urgente: {res['irr_urgente']}h"
+    elif res["irr_atencao"] > 0:
+        cls_i = "alert-amarelo"; icn_i = "🟡"
+        irr_txt = f"Atenção: {res['irr_atencao']}h"
+    else:
+        cls_i = "alert-verde"; icn_i = "🟢"
+        irr_txt = "Sem necessidade hídrica"
+    col_d.markdown(f"""
+    <div class='{cls_i}'>
+      <b>{icn_i} Irrigação (48h)</b><br>
+      <span style='font-size:0.95rem;font-weight:700;'>{irr_txt}</span>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Matrizes
+    col_m1, col_m2 = st.columns([1, 1])
+
+    with col_m1:
+        st.markdown("<div class='secao-titulo'>🌿 Janela de Defensivos — 24h</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""
+        <div class='info-card'>
+          <h4>Critérios MAPA Portaria 371/2020 + EMBRAPA Soja</h4>
+          <p>Vento &lt; 10 km/h · Temp &lt; 30°C · UR ≥ 55% · Sem precipitação</p>
+        </div>""", unsafe_allow_html=True)
+        fig_def = grafico_matriz_defensivos(df_def)
+        if fig_def:
+            st.pyplot(fig_def, use_container_width=True)
+            plt.close(fig_def)
+
+    with col_m2:
+        st.markdown("<div class='secao-titulo'>💧 Necessidade de Irrigação — 48h</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""
+        <div class='info-card'>
+          <h4>Critérios EMBRAPA Cerrados — Gomes (2014)</h4>
+          <p>UR, Temperatura e ETo Penman-Monteith classificados em 3 níveis de demanda hídrica</p>
+        </div>""", unsafe_allow_html=True)
+        fig_irr = grafico_matriz_irrigacao(df_irr)
+        if fig_irr:
+            st.pyplot(fig_irr, use_container_width=True)
+            plt.close(fig_irr)
+
+    # Variáveis extras selecionadas
+    if vars_selecionadas:
+        st.markdown("---")
+        st.markdown("<div class='secao-titulo'>📊 Variáveis Complementares</div>",
+                    unsafe_allow_html=True)
+        for var in vars_selecionadas:
+            fig_e = grafico_variavel(df_main, var)
+            st.pyplot(fig_e, use_container_width=True)
+            plt.close(fig_e)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 1 — PRECIPITAÇÃO
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tabs[1]:
+    st.markdown("<div class='secao-titulo'>🌧️ Precipitação</div>", unsafe_allow_html=True)
+
+    # Estatísticas rápidas
+    if "precipitation" in df_main.columns:
+        precip_s = df_main["precipitation"].dropna()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total 24h",  f"{precip_s.head(24).sum():.1f} mm")
+        c2.metric("Total 48h",  f"{precip_s.head(48).sum():.1f} mm")
+        c3.metric("Total 7 dias", f"{precip_s.sum():.1f} mm")
+        c4.metric("Máx horário", f"{precip_s.max():.1f} mm/h")
+
+    fig_p = grafico_variavel(df_main, "precipitation",
+                             df_ic_precip if mostrar_spread else None)
+    st.pyplot(fig_p, use_container_width=True)
+    plt.close(fig_p)
+
+    if mostrar_spread and ensemble_data:
+        fig_sp = grafico_spread(ensemble_data, "precipitation")
+        if fig_sp:
+            st.pyplot(fig_sp, use_container_width=True)
+            plt.close(fig_sp)
+
+    # Tabela diária de chuva acumulada
+    if "precipitation" in df_main.columns:
+        st.markdown("<div class='secao-titulo'>📅 Acumulado Diário</div>", unsafe_allow_html=True)
+        diario = df_main["precipitation"].resample("D").sum().reset_index()
+        diario.columns = ["Data", "Precipitação (mm)"]
+        diario["Data"] = diario["Data"].dt.strftime("%d/%m/%Y")
+        diario["Precipitação (mm)"] = diario["Precipitação (mm)"].round(1)
+        st.dataframe(diario, use_container_width=True, hide_index=True)
+
+    # CAPE
+    if "cape" in df_main.columns:
+        st.markdown("<div class='secao-titulo'>⚡ CAPE — Energia Convectiva Disponível</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""
+        <div class='info-card'>
+          <h4>Referência: CAPE como proxy de tempestades</h4>
+          <p>CAPE &lt; 500 J/kg: baixo risco · 500–1500: moderado · 1500–2500: alto · &gt;2500: extremo</p>
+        </div>""", unsafe_allow_html=True)
+        fig_cape = grafico_variavel(df_main, "cape")
+        st.pyplot(fig_cape, use_container_width=True)
+        plt.close(fig_cape)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 2 — TEMPERATURA
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tabs[2]:
+    st.markdown("<div class='secao-titulo'>🌡️ Temperatura</div>", unsafe_allow_html=True)
+
+    if "temperature_2m" in df_main.columns:
+        ts = df_main["temperature_2m"].dropna()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Atual",  f"{ts.iloc[0]:.1f} °C")
+        c2.metric("Máxima 7d", f"{ts.max():.1f} °C")
+        c3.metric("Mínima 7d", f"{ts.min():.1f} °C")
+        c4.metric("Média 7d",  f"{ts.mean():.1f} °C")
+
+    fig_t = grafico_variavel(df_main, "temperature_2m",
+                             df_ic_temp if mostrar_spread else None)
+    st.pyplot(fig_t, use_container_width=True)
+    plt.close(fig_t)
+
+    if mostrar_spread and ensemble_data:
+        fig_st = grafico_spread(ensemble_data, "temperature_2m")
+        if fig_st:
+            st.pyplot(fig_st, use_container_width=True)
+            plt.close(fig_st)
+
+    # Ponto de orvalho
+    if "dewpoint_2m" in df_main.columns:
+        st.markdown("<div class='secao-titulo'>🌫️ Ponto de Orvalho</div>", unsafe_allow_html=True)
+        fig_dew = grafico_variavel(df_main, "dewpoint_2m")
+        st.pyplot(fig_dew, use_container_width=True)
+        plt.close(fig_dew)
+
+    # Radiação solar
+    if "shortwave_radiation" in df_main.columns:
+        st.markdown("<div class='secao-titulo'>☀️ Radiação Solar de Onda Curta</div>",
+                    unsafe_allow_html=True)
+        fig_rad = grafico_variavel(df_main, "shortwave_radiation")
+        st.pyplot(fig_rad, use_container_width=True)
+        plt.close(fig_rad)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 3 — UMIDADE RELATIVA
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tabs[3]:
+    st.markdown("<div class='secao-titulo'>💧 Umidade Relativa</div>", unsafe_allow_html=True)
+
+    if "relativehumidity_2m" in df_main.columns:
+        ur_s = df_main["relativehumidity_2m"].dropna()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Atual",    f"{ur_s.iloc[0]:.0f} %")
+        c2.metric("Mínima 7d", f"{ur_s.min():.0f} %")
+        c3.metric("Máxima 7d", f"{ur_s.max():.0f} %")
+        horas_baixa = int((ur_s < IRR_UR_BAIXA).sum())
+        c4.metric(f"Horas < {IRR_UR_BAIXA:.0f}%", f"{horas_baixa}h")
+
+    fig_ur = grafico_variavel(df_main, "relativehumidity_2m",
+                              df_ic_ur if mostrar_spread else None)
+    st.pyplot(fig_ur, use_container_width=True)
+    plt.close(fig_ur)
+
+    if mostrar_spread and ensemble_data:
+        fig_sur = grafico_spread(ensemble_data, "relativehumidity_2m")
+        if fig_sur:
+            st.pyplot(fig_sur, use_container_width=True)
+            plt.close(fig_sur)
+
+    # ETo
+    if "et0_fao_evapotranspiration" in df_main.columns:
+        st.markdown("<div class='secao-titulo'>🌿 Evapotranspiração de Referência (ETo)</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""
+        <div class='info-card'>
+          <h4>ETo Penman-Monteith — FAO-56</h4>
+          <p>Demanda evapotranspirativa horária. ETo &gt; 0.25 mm/h: atenção à irrigação.
+             ETo &gt; 0.40 mm/h: elevada — irrigar.</p>
+        </div>""", unsafe_allow_html=True)
+        fig_eto = grafico_variavel(df_main, "et0_fao_evapotranspiration")
+        st.pyplot(fig_eto, use_container_width=True)
+        plt.close(fig_eto)
+
+    # Umidade do solo
+    if "soil_moisture_0_to_1cm" in df_main.columns:
+        st.markdown("<div class='secao-titulo'>🌱 Umidade do Solo (0–1 cm)</div>",
+                    unsafe_allow_html=True)
+        fig_sm = grafico_variavel(df_main, "soil_moisture_0_to_1cm")
+        st.pyplot(fig_sm, use_container_width=True)
+        plt.close(fig_sm)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 4 — VENTO
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tabs[4]:
+    st.markdown("<div class='secao-titulo'>🌬️ Vento</div>", unsafe_allow_html=True)
+
+    if "windspeed_10m" in df_main.columns:
+        ws = df_main["windspeed_10m"].dropna()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Atual",    f"{ws.iloc[0]:.0f} km/h")
+        c2.metric("Máximo 7d", f"{ws.max():.0f} km/h")
+        c3.metric("Média 7d",  f"{ws.mean():.1f} km/h")
+        horas_lim = int((ws < DEF_VENTO_MAX).sum())
+        c4.metric(f"Horas < {DEF_VENTO_MAX:.0f} km/h", f"{horas_lim}h")
+
+    # Velocidade
+    fig_w = grafico_variavel(df_main, "windspeed_10m",
+                             df_ic_vento if mostrar_spread else None)
+    st.pyplot(fig_w, use_container_width=True)
+    plt.close(fig_w)
+
+    if mostrar_spread and ensemble_data:
+        fig_sw = grafico_spread(ensemble_data, "windspeed_10m")
+        if fig_sw:
+            st.pyplot(fig_sw, use_container_width=True)
+            plt.close(fig_sw)
+
+    # Rajadas
+    if "windgusts_10m" in df_main.columns:
+        st.markdown("<div class='secao-titulo'>💨 Rajadas de Vento</div>", unsafe_allow_html=True)
+        fig_wg = grafico_variavel(df_main, "windgusts_10m")
+        st.pyplot(fig_wg, use_container_width=True)
+        plt.close(fig_wg)
+
+    # Pressão e nebulosidade
+    col_p, col_c = st.columns(2)
+    with col_p:
+        if "surface_pressure" in df_main.columns:
+            st.markdown("<div class='secao-titulo'>🔵 Pressão Superficial</div>",
+                        unsafe_allow_html=True)
+            fig_prs = grafico_variavel(df_main, "surface_pressure")
+            st.pyplot(fig_prs, use_container_width=True)
+            plt.close(fig_prs)
+    with col_c:
+        if "cloudcover" in df_main.columns:
+            st.markdown("<div class='secao-titulo'>☁️ Cobertura de Nuvens</div>",
+                        unsafe_allow_html=True)
+            fig_cc = grafico_variavel(df_main, "cloudcover")
+            st.pyplot(fig_cc, use_container_width=True)
+            plt.close(fig_cc)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 5 — RELATÓRIO & E-MAIL
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tabs[5]:
+    st.markdown("<div class='secao-titulo'>📄 Relatório & Exportação</div>", unsafe_allow_html=True)
+
+    col_r1, col_r2 = st.columns([3, 2])
+
+    with col_r1:
+        st.markdown("""
+        <div class='info-card'>
+          <h4>📋 Boletim Agrometeorólogico</h4>
+          <p>Gere o boletim completo da fazenda com todas as análises EMBRAPA/MAPA
+             e envie por e-mail para a equipe de campo.</p>
+        </div>""", unsafe_allow_html=True)
+
+        html_report = gerar_relatorio_html(
+            nome_fazenda, info_faz, df_main, res, agora_str)
+
+        st.markdown("#### Pré-visualização")
+        components.html(html_report, height=500, scrolling=True)
+
+    with col_r2:
+        st.markdown("#### 📧 Envio por E-mail")
+
+        if not _EMAIL_OK:
+            st.markdown("""
+            <div class='alert-amarelo'>
+              <b>⚠️ E-mail não configurado</b><br>
+              Adicione as credenciais Gmail em <code>.streamlit/secrets.toml</code>:<br><br>
+              <code>[email]<br>
+              remetente = "seu@gmail.com"<br>
+              senha_app = "xxxx xxxx xxxx xxxx"<br>
+              destinatario = "dest1@ex.com, dest2@ex.com"</code>
+            </div>""", unsafe_allow_html=True)
+        else:
+            dest_input = st.text_input(
+                "Destinatários (separados por vírgula)",
+                value=", ".join(_EMAIL_DEST))
+            assunto_input = st.text_input(
+                "Assunto",
+                value=f"Boletim Agrometeorológico — {nome_fazenda[:40]} — {agora_str}")
+
+            if st.button("📨 Enviar Boletim"):
+                dests = [e.strip() for e in dest_input.split(",") if e.strip()]
+                if not dests:
+                    st.error("Informe ao menos um destinatário.")
+                else:
+                    with st.spinner("Enviando…"):
+                        ok, msg_r = enviar_email(assunto_input, html_report, dests)
+                    if ok:
+                        st.success(f"✅ {msg_r}")
+                    else:
+                        st.error(f"❌ Erro: {msg_r}")
+
+        st.markdown("---")
+        st.markdown("#### 📊 Tabela de Dados Brutos")
+        df_exib = df_para_exibir(df_main)
+        if not df_exib.empty:
+            st.dataframe(df_exib, use_container_width=True, height=340)
+            csv_bytes = df_exib.to_csv().encode("utf-8")
+            st.download_button(
+                label="⬇️ Baixar CSV",
+                data=csv_bytes,
+                file_name=f"yamada_previsao_{nome_fazenda[:30].replace(' ','_')}_{agora_str[:10]}.csv",
+                mime="text/csv",
+            )
+
+    # Referências
+    st.markdown("---")
+    st.markdown("<div class='secao-titulo'>📚 Referências Técnicas</div>", unsafe_allow_html=True)
+    st.markdown("""
+    <div class='info-card'>
+      <h4>Fontes e Normativos</h4>
+      <p>
+        • <b>Open-Meteo</b>: Zippenfenig, P. (2023). Open-Meteo.com Weather API. Zenodo. doi:10.5281/zenodo.7970649<br>
+        • <b>GFS</b>: NOAA/NCEP Global Forecast System — 0.25° resolução<br>
+        • <b>ICON</b>: Zängl, G. et al. (2015). The ICON (ICOsahedral Non-hydrostatic) modelling framework. Q. J. R. Meteorol. Soc., 141:563–579<br>
+        • <b>Defensivos</b>: MAPA Portaria 371/2020 + EMBRAPA Soja (2022) — Tecnologia de Aplicação<br>
+        • <b>Irrigação</b>: Gomes, H.P. (2014). EMBRAPA Cerrados — Manejo de Irrigação no Cerrado<br>
+        • <b>ETo</b>: Allen, R.G. et al. (1998). FAO Irrigation and Drainage Paper 56 — Penman-Monteith<br>
+        • <b>CAPE</b>: Doswell, C.A. & Rasmussen, E.N. (1994). The Effect of Neglecting the Virtual Temperature Correction on CAPE Calculations. Wea. Forecasting, 9:625–629
+      </p>
+    </div>""", unsafe_allow_html=True)
