@@ -508,9 +508,8 @@ def grafico_variavel(df: pd.DataFrame, var: str,
     fig.update_layout(
         yaxis_title=label,
         yaxis_titlefont=dict(color="#9ca3af", size=9),
-        xaxis_tickformat="%d/%m\n%Hh",
-        xaxis_dtick=6 * 3600000,
     )
+    fig.update_xaxes(tickformat="%d/%m\n%Hh", dtick=6 * 3600000)
     return _plotly_layout(fig, title, height=340)
 
 
