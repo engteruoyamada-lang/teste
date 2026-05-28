@@ -1,35 +1,15 @@
-"""
-=============================================================================
-YAMADA ENGENHARIA — Agrometeorologia para Fazendas do MS  v5.0
-=============================================================================
-Estrutura:
-  • Sidebar  : seleciona fazenda mock + modelo + variáveis
-  • Aba 0 ★  : Síntese   — matrizes defensivos + irrigação (padrão EMBRAPA)
-  • Aba 1    : Precipitação
-  • Aba 2    : Temperatura
-  • Aba 3    : Umidade Relativa
-  • Aba 4    : Vento
-  • Aba 5    : Relatório & E-mail
-Fonte única: Open-Meteo (GFS + ICON — melhores para convecção subtropical MS)
-=============================================================================
-"""
-
 # ─── IMPORTS ──────────────────────────────────────────────────────────────────
 import streamlit as st
 import streamlit.components.v1 as components
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import matplotlib.colors as mcolors
-import matplotlib.patches as mpatches
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -46,8 +26,6 @@ VERDE_ESCURO  = "#1B4D2E"
 VERDE_MEDIO   = "#3DA63A"
 PRETO         = "#1A1A1A"
 CINZA_CLARO   = "#F4F7F4"
-AMARELO_ALERT = "#F5A623"
-VERMELHO_ALRT = "#D0021B"
 BG_DARK       = "#0d1117"
 BG_PANEL      = "#111827"
 
@@ -60,8 +38,6 @@ html, body, [class*="css"] {{
   font-family:'Source Sans 3',sans-serif;
   background-color:{CINZA_CLARO}; color:{PRETO};
 }}
-
-/* ── Header ── */
 .yamada-header {{
   background:linear-gradient(135deg,{VERDE_ESCURO} 0%,{VERDE_MEDIO} 100%);
   border-radius:12px; padding:22px 32px; margin-bottom:18px;
@@ -72,8 +48,6 @@ html, body, [class*="css"] {{
   color:white; margin:0; letter-spacing:-0.5px;
 }}
 .yamada-header p {{ color:rgba(255,255,255,0.82); margin:4px 0 0 0; font-size:0.88rem; }}
-
-/* ── Cards ── */
 .info-card {{
   background:white; border-left:4px solid {VERDE_MEDIO}; border-radius:8px;
   padding:14px 18px; margin-bottom:10px; box-shadow:0 2px 8px rgba(0,0,0,0.06);
@@ -83,21 +57,15 @@ html, body, [class*="css"] {{
   margin:0 0 4px 0; font-size:0.88rem;
 }}
 .info-card p {{ margin:0; font-size:0.82rem; color:#333; line-height:1.45; }}
-
-/* ── Alertas ── */
 .alert-verde    {{background:#e8f5e9;border-left:4px solid #43a047;border-radius:8px;padding:12px 16px;margin:6px 0;}}
 .alert-amarelo  {{background:#fff8e1;border-left:4px solid #fbc02d;border-radius:8px;padding:12px 16px;margin:6px 0;}}
 .alert-vermelho {{background:#ffebee;border-left:4px solid #e53935;border-radius:8px;padding:12px 16px;margin:6px 0;}}
 .alert-azul     {{background:#e3f2fd;border-left:4px solid #1565c0;border-radius:8px;padding:12px 16px;margin:6px 0;}}
-
-/* ── Seção título ── */
 .secao-titulo {{
   font-family:'Montserrat',sans-serif; font-weight:800; font-size:1.05rem;
   color:{VERDE_ESCURO}; border-bottom:2px solid {VERDE_MEDIO};
   padding-bottom:5px; margin:22px 0 12px 0;
 }}
-
-/* ── Botão ── */
 .stButton>button {{
   background:linear-gradient(135deg,{VERDE_ESCURO},{VERDE_MEDIO}) !important;
   color:white !important; font-family:'Montserrat',sans-serif !important;
@@ -110,8 +78,6 @@ html, body, [class*="css"] {{
   transform:translateY(-1px) !important;
   box-shadow:0 6px 20px rgba(27,77,46,0.5) !important;
 }}
-
-/* ── Sidebar ── */
 section[data-testid="stSidebar"] {{
   background-color:#1a2e1c !important; border-right:1px solid #2d5a30;
 }}
@@ -125,8 +91,6 @@ section[data-testid="stSidebar"] .stSelectbox>div>div {{
   border-color:#3DA63A !important;
 }}
 section[data-testid="stSidebar"] hr {{ border-color:#2d5a30 !important; }}
-
-/* ── Métricas ── */
 div[data-testid="metric-container"] {{
   background:white; border-radius:10px; padding:13px;
   box-shadow:0 2px 10px rgba(0,0,0,0.07); border-top:3px solid {VERDE_MEDIO};
@@ -136,7 +100,7 @@ hr {{ border-color:#ddeedd; margin:16px 0; }}
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ─── E-MAIL (secrets opcionais) ───────────────────────────────────────────────
+# ─── E-MAIL ───────────────────────────────────────────────────────────────────
 try:
     _EMAIL_REM  = st.secrets["email"]["remetente"]
     _EMAIL_PASS = st.secrets["email"]["senha_app"]
@@ -147,9 +111,9 @@ try:
 except Exception:
     _EMAIL_REM = _EMAIL_PASS = ""; _EMAIL_DEST = []; _EMAIL_OK = False
 
-# ─── FAZENDAS MOCK ────────────────────────────────────────────────────────────
+# ─── FAZENDAS ────────────────────────────────────────────────────────────────
 FAZENDAS = {
-    "Fazenda Santa Fé (Maracaju — Soja/Milho)":      {"lat": -21.614, "lon": -55.168, "area_ha": 3200, "cultura": "Soja/Milho"},
+    "Fazenda Santa Fé (Maracaju — Soja/Milho)":       {"lat": -21.614, "lon": -55.168, "area_ha": 3200, "cultura": "Soja/Milho"},
     "Fazenda Água Limpa (Chapadão do Sul — Soja)":    {"lat": -18.791, "lon": -52.627, "area_ha": 4800, "cultura": "Soja"},
     "Fazenda Planalto (Dourados — Soja/Trigo)":       {"lat": -22.221, "lon": -54.805, "area_ha": 2100, "cultura": "Soja/Trigo"},
     "Fazenda Campo Verde (Rio Brilhante — Cana/Soja)":{"lat": -21.802, "lon": -54.544, "area_ha": 5600, "cultura": "Cana/Soja"},
@@ -161,14 +125,12 @@ FAZENDAS = {
     "Fazenda Três Lagoas (Celulose/Pastagem)":        {"lat": -20.752, "lon": -51.678, "area_ha": 7400, "cultura": "Celulose/Pastagem"},
 }
 
-# ─── MODELOS OPEN-METEO ───────────────────────────────────────────────────────
 MODELOS = {
     "best_match":    "Best Match (Ensemble GFS+ICON — recomendado)",
     "gfs_seamless":  "GFS (NOAA — precipitação Centro-Oeste)",
     "icon_seamless": "ICON (DWD — convecção subtropical)",
 }
 
-# ─── VARIÁVEIS ────────────────────────────────────────────────────────────────
 VARS_HORARIAS = [
     "temperature_2m", "precipitation", "relativehumidity_2m",
     "windspeed_10m", "windgusts_10m", "dewpoint_2m",
@@ -191,6 +153,21 @@ LABELS = {
     "surface_pressure":            "Pressão (hPa)",
     "cloudcover":                  "Cobertura de Nuvens (%)",
     "soil_moisture_0_to_1cm":      "Umidade do Solo 0–1cm (m³/m³)",
+}
+
+HOVER_FMT = {
+    "temperature_2m":             "%{x|%d/%m %Hh}<br><b>Temperatura:</b> %{y:.1f} °C<extra></extra>",
+    "precipitation":              "%{x|%d/%m %Hh}<br><b>Precipitação:</b> %{y:.2f} mm/h<extra></extra>",
+    "relativehumidity_2m":        "%{x|%d/%m %Hh}<br><b>Umidade Relativa:</b> %{y:.0f} %<extra></extra>",
+    "windspeed_10m":              "%{x|%d/%m %Hh}<br><b>Vento:</b> %{y:.1f} km/h<extra></extra>",
+    "windgusts_10m":              "%{x|%d/%m %Hh}<br><b>Rajada:</b> %{y:.1f} km/h<extra></extra>",
+    "dewpoint_2m":                "%{x|%d/%m %Hh}<br><b>Orvalho:</b> %{y:.1f} °C<extra></extra>",
+    "shortwave_radiation":         "%{x|%d/%m %Hh}<br><b>Radiação:</b> %{y:.1f} W/m²<extra></extra>",
+    "et0_fao_evapotranspiration":  "%{x|%d/%m %Hh}<br><b>ETo:</b> %{y:.3f} mm/h<extra></extra>",
+    "cape":                       "%{x|%d/%m %Hh}<br><b>CAPE:</b> %{y:.0f} J/kg<extra></extra>",
+    "surface_pressure":           "%{x|%d/%m %Hh}<br><b>Pressão:</b> %{y:.1f} hPa<extra></extra>",
+    "cloudcover":                 "%{x|%d/%m %Hh}<br><b>Nebulosidade:</b> %{y:.0f} %<extra></extra>",
+    "soil_moisture_0_to_1cm":     "%{x|%d/%m %Hh}<br><b>Umidade Solo:</b> %{y:.4f} m³/m³<extra></extra>",
 }
 
 CORES = {
@@ -216,20 +193,50 @@ WCODE = {
     95:"⛈ Tempestade", 96:"⛈ Tempestade + granizo", 99:"⛈ Granizo severo",
 }
 
-# ─── PARÂMETROS EMBRAPA / MAPA ────────────────────────────────────────────────
+# ─── PARÂMETROS EMBRAPA/MAPA ──────────────────────────────────────────────────
 DEF_VENTO_MAX   = 10.0
 DEF_TEMP_MAX    = 30.0
 DEF_UR_MIN      = 55.0
 DEF_PRECIP_MAX  = 0.0
-
 IRR_UR_BAIXA    = 60.0
 IRR_UR_CRITICA  = 40.0
 IRR_TEMP_ALTA   = 32.0
 IRR_ETO_ALTA    = 0.25
 
 
+# ─── HELPER: HEX → RGB string ────────────────────────────────────────────────
+def _rgb(hex_color: str) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"{r},{g},{b}"
+
+
+def _plotly_layout(fig: go.Figure, title: str = "", height: int = 340) -> go.Figure:
+    """Aplica tema escuro padrão Yamada a qualquer figura Plotly."""
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=BG_DARK,
+        plot_bgcolor=BG_PANEL,
+        title=dict(text=title, font=dict(color="white", size=11, family="Montserrat"), x=0.01),
+        xaxis=dict(gridcolor="#1f2937", showgrid=True, zeroline=False,
+                   tickfont=dict(size=8, color="#9ca3af")),
+        yaxis=dict(gridcolor="#1f2937", showgrid=True, zeroline=False,
+                   tickfont=dict(size=8, color="#9ca3af")),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01,
+            xanchor="right", x=1,
+            font=dict(size=8, color="white"),
+            bgcolor="rgba(17,24,39,0.8)", bordercolor="#374151",
+        ),
+        height=height,
+        margin=dict(l=55, r=20, t=55, b=40),
+        hovermode="x unified",
+    )
+    return fig
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# COLETA DE DADOS — OPEN-METEO
+# COLETA DE DADOS
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -303,13 +310,10 @@ def ic_entre_modelos(ensemble: dict, var: str) -> pd.DataFrame:
     med  = df_e.mean(axis=1)
     std  = df_e.std(axis=1)
     return pd.DataFrame({
-        "media":     med,
-        "std":       std,
-        "ic68_low":  med - std,
-        "ic68_high": med + std,
-        "ic95_low":  med - 2*std,
-        "ic95_high": med + 2*std,
-        "cv_pct":   (std / (med.abs() + 1e-6) * 100).round(1),
+        "media": med, "std": std,
+        "ic68_low": med - std, "ic68_high": med + std,
+        "ic95_low": med - 2*std, "ic95_high": med + 2*std,
+        "cv_pct": (std / (med.abs() + 1e-6) * 100).round(1),
     })
 
 
@@ -320,34 +324,27 @@ def ic_entre_modelos(ensemble: dict, var: str) -> pd.DataFrame:
 def calcular_janela_defensivos(df: pd.DataFrame) -> pd.DataFrame:
     df24 = df.head(24).copy()
     out  = pd.DataFrame(index=df24.index)
-
-    out["vento_ok"] = (df24.get("windspeed_10m",
-                                pd.Series(5,  index=df24.index)) < DEF_VENTO_MAX).astype(int)
-    out["temp_ok"]  = (df24.get("temperature_2m",
-                                pd.Series(25, index=df24.index)) < DEF_TEMP_MAX).astype(int)
-    out["ur_ok"]    = (df24.get("relativehumidity_2m",
-                                pd.Series(65, index=df24.index)) >= DEF_UR_MIN).astype(int)
-    out["chuva_ok"] = (df24.get("precipitation",
-                                pd.Series(0,  index=df24.index)) <= DEF_PRECIP_MAX).astype(int)
+    out["vento_ok"] = (df24.get("windspeed_10m",        pd.Series(5,  index=df24.index)) < DEF_VENTO_MAX).astype(int)
+    out["temp_ok"]  = (df24.get("temperature_2m",       pd.Series(25, index=df24.index)) < DEF_TEMP_MAX).astype(int)
+    out["ur_ok"]    = (df24.get("relativehumidity_2m",  pd.Series(65, index=df24.index)) >= DEF_UR_MIN).astype(int)
+    out["chuva_ok"] = (df24.get("precipitation",        pd.Series(0,  index=df24.index)) <= DEF_PRECIP_MAX).astype(int)
     out["n_ok"]     = out[["vento_ok","temp_ok","ur_ok","chuva_ok"]].sum(axis=1)
-    out["status"]   = out["n_ok"].map(lambda x: "aberta" if x==4 else
-                                                ("parcial" if x==3 else "bloqueada"))
+    out["status"]   = out["n_ok"].map(lambda x: "aberta" if x==4 else ("parcial" if x==3 else "bloqueada"))
 
     def _motivo(row):
-        src = df24
         m = []
         idx = row.name
         if not row["vento_ok"]:
-            v = src["windspeed_10m"].get(idx, 0) if "windspeed_10m" in src.columns else 0
+            v = df24["windspeed_10m"].get(idx, 0) if "windspeed_10m" in df24.columns else 0
             m.append(f"Vento {v:.0f} km/h ≥ {DEF_VENTO_MAX:.0f}")
         if not row["temp_ok"]:
-            v = src["temperature_2m"].get(idx, 0) if "temperature_2m" in src.columns else 0
+            v = df24["temperature_2m"].get(idx, 0) if "temperature_2m" in df24.columns else 0
             m.append(f"Temp {v:.0f}°C ≥ {DEF_TEMP_MAX:.0f}")
         if not row["ur_ok"]:
-            v = src["relativehumidity_2m"].get(idx, 0) if "relativehumidity_2m" in src.columns else 0
+            v = df24["relativehumidity_2m"].get(idx, 0) if "relativehumidity_2m" in df24.columns else 0
             m.append(f"UR {v:.0f}% < {DEF_UR_MIN:.0f}")
         if not row["chuva_ok"]:
-            v = src["precipitation"].get(idx, 0) if "precipitation" in src.columns else 0
+            v = df24["precipitation"].get(idx, 0) if "precipitation" in df24.columns else 0
             m.append(f"Chuva {v:.1f} mm")
         return " · ".join(m) if m else "✅ Todos os critérios atendidos"
 
@@ -358,21 +355,14 @@ def calcular_janela_defensivos(df: pd.DataFrame) -> pd.DataFrame:
 def calcular_janela_irrigacao(df: pd.DataFrame) -> pd.DataFrame:
     df48 = df.head(48).copy()
     out  = pd.DataFrame(index=df48.index)
-
     ur   = df48.get("relativehumidity_2m",        pd.Series(65,   index=df48.index))
     tmp  = df48.get("temperature_2m",             pd.Series(27,   index=df48.index))
     eto  = df48.get("et0_fao_evapotranspiration", pd.Series(0.15, index=df48.index))
-
-    out["ur_nivel"]  = ur.apply(lambda v:  0 if v >= IRR_UR_BAIXA else
-                                           (1 if v >= IRR_UR_CRITICA else 2))
-    out["tmp_nivel"] = tmp.apply(lambda v: 0 if v < IRR_TEMP_ALTA else
-                                           (1 if v < 38 else 2))
-    out["eto_nivel"] = eto.apply(lambda v: 0 if v < IRR_ETO_ALTA else
-                                           (1 if v < 0.40 else 2))
-
-    out["nivel_max"]   = out[["ur_nivel","tmp_nivel","eto_nivel"]].max(axis=1)
-    out["status_irr"]  = out["nivel_max"].map(
-        {0:"sem_necessidade", 1:"atencao", 2:"irrigar"})
+    out["ur_nivel"]  = ur.apply(lambda v:  0 if v >= IRR_UR_BAIXA else (1 if v >= IRR_UR_CRITICA else 2))
+    out["tmp_nivel"] = tmp.apply(lambda v: 0 if v < IRR_TEMP_ALTA else (1 if v < 38 else 2))
+    out["eto_nivel"] = eto.apply(lambda v: 0 if v < IRR_ETO_ALTA else (1 if v < 0.40 else 2))
+    out["nivel_max"] = out[["ur_nivel","tmp_nivel","eto_nivel"]].max(axis=1)
+    out["status_irr"] = out["nivel_max"].map({0:"sem_necessidade", 1:"atencao", 2:"irrigar"})
 
     def _motivo_irr(row):
         m = []
@@ -387,10 +377,9 @@ def calcular_janela_irrigacao(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def resumo_janelas(df_def: pd.DataFrame, df_irr: pd.DataFrame) -> dict:
-    n_ab  = int((df_def["status"] == "aberta").sum())
-    n_pa  = int((df_def["status"] == "parcial").sum())
-    n_bl  = int((df_def["status"] == "bloqueada").sum())
-
+    n_ab = int((df_def["status"] == "aberta").sum())
+    n_pa = int((df_def["status"] == "parcial").sum())
+    n_bl = int((df_def["status"] == "bloqueada").sum())
     bloco = cur = 0
     bloco_inicio = bloco_fim = None
     cur_inicio = None
@@ -399,268 +388,340 @@ def resumo_janelas(df_def: pd.DataFrame, df_irr: pd.DataFrame) -> dict:
             if cur == 0: cur_inicio = t
             cur += 1
             if cur > bloco:
-                bloco = cur
-                bloco_inicio = cur_inicio
-                bloco_fim    = t
+                bloco = cur; bloco_inicio = cur_inicio; bloco_fim = t
         else:
             cur = 0
-
     n_irr = int((df_irr["status_irr"] == "irrigar").sum())
     n_atn = int((df_irr["status_irr"] == "atencao").sum())
-
     return {
-        "def_abertas":    n_ab,
-        "def_parciais":   n_pa,
-        "def_bloqueadas": n_bl,
-        "def_bloco_h":    bloco,
-        "def_bloco_ini":  bloco_inicio,
-        "def_bloco_fim":  bloco_fim,
-        "irr_urgente":    n_irr,
-        "irr_atencao":    n_atn,
+        "def_abertas": n_ab, "def_parciais": n_pa, "def_bloqueadas": n_bl,
+        "def_bloco_h": bloco, "def_bloco_ini": bloco_inicio, "def_bloco_fim": bloco_fim,
+        "irr_urgente": n_irr, "irr_atencao": n_atn,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNÇÕES DE GRÁFICO
+# GRÁFICOS PLOTLY — INTERATIVOS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _ax_dark(ax):
-    ax.set_facecolor(BG_PANEL)
-    ax.tick_params(colors="#9ca3af", labelsize=8)
-    for sp in ax.spines.values():
-        sp.set_edgecolor("#374151")
-    ax.grid(True, color="#1f2937", linewidth=0.6, alpha=0.7)
+# Limiares por variável
+LIMIARES = {
+    "temperature_2m": [
+        (5,             "#93c5fd", "Geada (5°C)"),
+        (DEF_TEMP_MAX,  "#fbbf24", f"Lim. defensivos ({DEF_TEMP_MAX:.0f}°C)"),
+        (IRR_TEMP_ALTA, "#f97316", f"Estresse hídrico ({IRR_TEMP_ALTA:.0f}°C)"),
+        (38,            "#ef4444", "Calor extremo (38°C)"),
+    ],
+    "relativehumidity_2m": [
+        (DEF_UR_MIN,     "#fbbf24", f"Lim. defensivos ({DEF_UR_MIN:.0f}%)"),
+        (IRR_UR_BAIXA,   "#fb923c", f"Irrig. atenção ({IRR_UR_BAIXA:.0f}%)"),
+        (IRR_UR_CRITICA, "#ef4444", f"Irrig. urgente ({IRR_UR_CRITICA:.0f}%)"),
+        (80,             "#c084fc", "Risco ferrugem (80%)"),
+    ],
+    "windspeed_10m": [
+        (DEF_VENTO_MAX, "#fbbf24", f"Lim. defensivos ({DEF_VENTO_MAX:.0f} km/h)"),
+        (40,            "#ef4444", "Dano potencial (40 km/h)"),
+    ],
+    "precipitation": [
+        (10, "#fbbf24", "Atenção (10 mm/h)"),
+        (25, "#ef4444", "Intensidade forte (25 mm/h)"),
+    ],
+    "cape": [
+        (500,  "#fbbf24", "CAPE moderado (500 J/kg)"),
+        (1500, "#f97316", "CAPE alto (1500 J/kg)"),
+        (2500, "#ef4444", "CAPE extremo (2500 J/kg)"),
+    ],
+    "et0_fao_evapotranspiration": [
+        (IRR_ETO_ALTA, "#fb923c", f"ETo atenção ({IRR_ETO_ALTA:.2f} mm/h)"),
+        (0.40,         "#ef4444", "ETo elevada (0.40 mm/h)"),
+    ],
+}
 
 
 def grafico_variavel(df: pd.DataFrame, var: str,
                      df_ic: pd.DataFrame = None,
-                     titulo_extra: str = "") -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(13, 3.8), facecolor=BG_DARK)
-    _ax_dark(ax)
-
+                     titulo_extra: str = "") -> go.Figure:
     cor   = CORES.get(var, "#60a5fa")
     label = LABELS.get(var, var)
+    title = f"{label}{titulo_extra}"
+    fig   = go.Figure()
 
     if var not in df.columns or df.empty:
-        ax.text(0.5, 0.5, "Dados não disponíveis",
-                transform=ax.transAxes, ha="center", va="center",
-                color="white", fontsize=12)
-        return fig
+        fig.add_annotation(text="Dados não disponíveis", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False,
+                           font=dict(color="white", size=14))
+        return _plotly_layout(fig, title)
 
-    serie = df[var].dropna()
+    serie  = df[var].dropna()
+    htmpl  = HOVER_FMT.get(var, "%{x|%d/%m %Hh}<br>%{y}<extra></extra>")
 
+    # ── Faixas de incerteza (IC) ──
     if df_ic is not None and not df_ic.empty:
         ic_re = df_ic.reindex(serie.index, method="nearest")
-        ax.fill_between(serie.index, ic_re["ic95_low"], ic_re["ic95_high"],
-                        alpha=0.08, color=cor, label="IC 95%")
-        ax.fill_between(serie.index, ic_re["ic68_low"], ic_re["ic68_high"],
-                        alpha=0.18, color=cor, label="IC 68%")
+        fig.add_trace(go.Scatter(
+            x=ic_re.index, y=ic_re["ic95_high"],
+            fill=None, mode="lines", line=dict(color=cor, width=0),
+            showlegend=False, hoverinfo="skip", name="IC95 sup",
+        ))
+        fig.add_trace(go.Scatter(
+            x=ic_re.index, y=ic_re["ic95_low"],
+            fill="tonexty", mode="lines", line=dict(color=cor, width=0),
+            fillcolor=f"rgba({_rgb(cor)},0.10)", name="IC 95%",
+            hovertemplate="%{x|%d/%m %Hh}<br>IC 95%: %{y:.2f}<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=ic_re.index, y=ic_re["ic68_high"],
+            fill=None, mode="lines", line=dict(color=cor, width=0),
+            showlegend=False, hoverinfo="skip", name="IC68 sup",
+        ))
+        fig.add_trace(go.Scatter(
+            x=ic_re.index, y=ic_re["ic68_low"],
+            fill="tonexty", mode="lines", line=dict(color=cor, width=0),
+            fillcolor=f"rgba({_rgb(cor)},0.20)", name="IC 68%",
+            hovertemplate="%{x|%d/%m %Hh}<br>IC 68%: %{y:.2f}<extra></extra>",
+        ))
 
+    # ── Série principal ──
     if var == "precipitation":
-        ax.bar(serie.index, serie.values, width=1/24,
-               color=cor, alpha=0.82, align="center", label=label, zorder=5)
+        fig.add_trace(go.Bar(
+            x=serie.index, y=serie.values, name=label,
+            marker_color=cor, opacity=0.85,
+            hovertemplate=htmpl,
+        ))
     else:
-        ax.plot(serie.index, serie.values, color=cor,
-                linewidth=2.0, label=label, zorder=5)
-        ax.fill_between(serie.index, serie.values, alpha=0.09, color=cor)
+        fig.add_trace(go.Scatter(
+            x=serie.index, y=serie.values, mode="lines",
+            name=label, line=dict(color=cor, width=2.2),
+            fill="tozeroy", fillcolor=f"rgba({_rgb(cor)},0.08)",
+            hovertemplate=htmpl,
+        ))
 
-    LIMIARES = {
-        "temperature_2m": [
-            (5,           "#93c5fd", "Geada (5°C)"),
-            (DEF_TEMP_MAX,"#fbbf24", f"Lim. defensivos ({DEF_TEMP_MAX:.0f}°C)"),
-            (IRR_TEMP_ALTA,"#f97316",f"Estresse hídrico ({IRR_TEMP_ALTA:.0f}°C)"),
-            (38,          "#ef4444", "Calor extremo (38°C)"),
-        ],
-        "relativehumidity_2m": [
-            (DEF_UR_MIN,  "#fbbf24", f"Lim. defensivos ({DEF_UR_MIN:.0f}%)"),
-            (IRR_UR_BAIXA,"#fb923c", f"Irrig. atenção ({IRR_UR_BAIXA:.0f}%)"),
-            (IRR_UR_CRITICA,"#ef4444",f"Irrig. urgente ({IRR_UR_CRITICA:.0f}%)"),
-            (80,          "#c084fc", "Risco ferrugem (80%)"),
-        ],
-        "windspeed_10m": [
-            (DEF_VENTO_MAX,"#fbbf24",f"Lim. defensivos ({DEF_VENTO_MAX:.0f} km/h)"),
-            (40,           "#ef4444","Dano potencial (40 km/h)"),
-        ],
-        "precipitation": [
-            (10,  "#fbbf24","Atenção (10 mm/h)"),
-            (25,  "#ef4444","Intensidade forte (25 mm/h)"),
-        ],
-        "cape": [
-            (500,  "#fbbf24","CAPE moderado (500 J/kg)"),
-            (1500, "#f97316","CAPE alto (1500 J/kg)"),
-            (2500, "#ef4444","CAPE extremo (2500 J/kg)"),
-        ],
-        "et0_fao_evapotranspiration": [
-            (IRR_ETO_ALTA, "#fb923c",f"ETo atenção ({IRR_ETO_ALTA:.2f} mm/h)"),
-            (0.40,         "#ef4444","ETo elevada (0.40 mm/h)"),
-        ],
-    }
+    # ── Limiares ──
     for val, cor_l, lbl in LIMIARES.get(var, []):
-        ax.axhline(val, color=cor_l, linewidth=0.9,
-                   linestyle="--", alpha=0.75, label=lbl)
+        fig.add_hline(
+            y=val, line_dash="dash", line_color=cor_l, line_width=1.1,
+            annotation_text=lbl,
+            annotation_position="top right",
+            annotation_font=dict(color=cor_l, size=8),
+        )
 
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%Hh"))
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
-    ax.set_ylabel(label, color="#9ca3af", fontsize=9)
-    titulo = f"{label}{titulo_extra}"
-    ax.set_title(titulo, color="white", fontsize=10, fontweight="bold", pad=8)
-
-    handles, labs = ax.get_legend_handles_labels()
-    ax.legend(handles, labs, fontsize=7, facecolor=BG_PANEL,
-              labelcolor="white", edgecolor="#374151",
-              loc="upper right", ncol=2)
-    plt.tight_layout(pad=0.5)
-    return fig
+    fig.update_layout(
+        yaxis_title=label,
+        yaxis_titlefont=dict(color="#9ca3af", size=9),
+        xaxis_tickformat="%d/%m\n%Hh",
+        xaxis_dtick=6 * 3600000,
+    )
+    return _plotly_layout(fig, title, height=340)
 
 
-def grafico_spread(ensemble: dict, var: str) -> plt.Figure:
+def grafico_spread(ensemble: dict, var: str) -> go.Figure | None:
     series = {}
+    nomes  = {"gfs_seamless": "GFS", "icon_seamless": "ICON", "best_match": "Best Match"}
+    cores_mod = {"GFS": "#60a5fa", "ICON": "#f97316", "Best Match": "#34d399"}
+
     for mod, dados in ensemble.items():
         if "hourly" in dados and var in dados["hourly"]:
+            nome = nomes.get(mod, mod)
             s = pd.Series(
                 pd.to_numeric(dados["hourly"][var], errors="coerce"),
                 index=pd.to_datetime(dados["hourly"]["time"]),
-                name={"gfs_seamless":"GFS","icon_seamless":"ICON",
-                      "best_match":"Best Match"}.get(mod, mod),
+                name=nome,
             )
-            series[s.name] = s
+            series[nome] = s
+
     if len(series) < 2:
         return None
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 5.5),
-                                    facecolor=BG_DARK,
-                                    gridspec_kw={"height_ratios":[3,1]})
-    for ax in [ax1, ax2]:
-        _ax_dark(ax)
+    df_e = pd.concat(series.values(), axis=1)
+    med  = df_e.mean(axis=1)
+    std  = df_e.std(axis=1)
+    cv   = (std / (med.abs() + 1e-6) * 100)
 
-    df_e  = pd.concat(series.values(), axis=1)
-    med   = df_e.mean(axis=1)
-    std   = df_e.std(axis=1)
-    cv    = (std / (med.abs() + 1e-6) * 100)
-    cores_mod = ["#60a5fa","#f97316","#34d399"]
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.70, 0.30],
+        vertical_spacing=0.06,
+    )
 
-    ax1.fill_between(med.index, med-2*std, med+2*std, alpha=0.09, color="#60a5fa", label="IC 95%")
-    ax1.fill_between(med.index, med-std,   med+std,   alpha=0.18, color="#60a5fa", label="IC 68%")
-    for (nome, s), c in zip(series.items(), cores_mod):
-        ax1.plot(s.index, s.values, color=c, linewidth=1.3,
-                 alpha=0.85, linestyle="--", label=nome)
-    ax1.plot(med.index, med.values, color="white",
-             linewidth=2.2, label="Média modelos", zorder=5)
-    ax1.set_ylabel(LABELS.get(var, var), color="#9ca3af", fontsize=9)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%Hh"))
-    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=12))
-    ax1.legend(fontsize=7, facecolor=BG_PANEL, labelcolor="white",
-               edgecolor="#374151", loc="upper right", ncol=3)
-    ax1.set_title(f"Spread entre modelos — {LABELS.get(var,var)}",
-                  color="white", fontsize=10, fontweight="bold")
+    # IC 95 e 68
+    fig.add_trace(go.Scatter(x=med.index, y=(med + 2*std).values, fill=None,
+                             mode="lines", line=dict(color="#60a5fa", width=0),
+                             showlegend=False, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=med.index, y=(med - 2*std).values,
+                             fill="tonexty", mode="lines", line=dict(color="#60a5fa", width=0),
+                             fillcolor="rgba(96,165,250,0.09)", name="IC 95%",
+                             hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=med.index, y=(med + std).values, fill=None,
+                             mode="lines", line=dict(color="#60a5fa", width=0),
+                             showlegend=False, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=med.index, y=(med - std).values,
+                             fill="tonexty", mode="lines", line=dict(color="#60a5fa", width=0),
+                             fillcolor="rgba(96,165,250,0.18)", name="IC 68%",
+                             hoverinfo="skip"), row=1, col=1)
 
-    cv_c = ["#22c55e" if v<10 else ("#fbbf24" if v<25 else "#ef4444") for v in cv.values]
-    ax2.bar(cv.index, cv.values, width=1/24, color=cv_c, alpha=0.85)
-    ax2.axhline(10, color="#22c55e", linestyle="--", linewidth=0.8, alpha=0.7, label="Alta (<10%)")
-    ax2.axhline(25, color="#ef4444", linestyle="--", linewidth=0.8, alpha=0.7, label="Baixa (>25%)")
-    ax2.set_ylabel("CV % (incerteza)", color="#9ca3af", fontsize=8)
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
-    ax2.xaxis.set_major_locator(mdates.DayLocator())
-    ax2.legend(fontsize=7, facecolor=BG_PANEL, labelcolor="white", edgecolor="#374151")
+    # Modelos individuais
+    for nome, s in series.items():
+        fig.add_trace(go.Scatter(
+            x=s.index, y=s.values, mode="lines", name=nome,
+            line=dict(color=cores_mod.get(nome, "#aaa"), width=1.4, dash="dot"),
+            opacity=0.88,
+            hovertemplate=f"%{{x|%d/%m %Hh}}<br>{nome}: %{{y:.2f}}<extra></extra>",
+        ), row=1, col=1)
 
-    plt.tight_layout(pad=0.5)
+    # Média
+    fig.add_trace(go.Scatter(
+        x=med.index, y=med.values, mode="lines", name="Média modelos",
+        line=dict(color="white", width=2.4),
+        hovertemplate="%{x|%d/%m %Hh}<br>Média: %{y:.2f}<extra></extra>",
+    ), row=1, col=1)
+
+    # CV (incerteza)
+    cv_colors = ["#22c55e" if v < 10 else ("#fbbf24" if v < 25 else "#ef4444") for v in cv.values]
+    fig.add_trace(go.Bar(
+        x=cv.index, y=cv.values, name="CV %",
+        marker_color=cv_colors, opacity=0.88,
+        hovertemplate="%{x|%d/%m %Hh}<br>Incerteza CV: %{y:.1f}%<extra></extra>",
+    ), row=2, col=1)
+    fig.add_hline(y=10, line_dash="dash", line_color="#22c55e", line_width=0.8,
+                  annotation_text="Alta confiança (<10%)",
+                  annotation_font=dict(color="#22c55e", size=7), row=2, col=1)
+    fig.add_hline(y=25, line_dash="dash", line_color="#ef4444", line_width=0.8,
+                  annotation_text="Baixa confiança (>25%)",
+                  annotation_font=dict(color="#ef4444", size=7), row=2, col=1)
+
+    label = LABELS.get(var, var)
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=BG_DARK, plot_bgcolor=BG_PANEL,
+        title=dict(text=f"Spread entre modelos — {label}",
+                   font=dict(color="white", size=11, family="Montserrat"), x=0.01),
+        height=460,
+        margin=dict(l=55, r=20, t=55, b=40),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
+                    font=dict(size=8, color="white"),
+                    bgcolor="rgba(17,24,39,0.8)", bordercolor="#374151"),
+    )
+    fig.update_xaxes(gridcolor="#1f2937", tickfont=dict(size=8, color="#9ca3af"))
+    fig.update_yaxes(gridcolor="#1f2937", tickfont=dict(size=8, color="#9ca3af"))
+    fig.update_yaxes(title_text=label, title_font=dict(color="#9ca3af", size=9), row=1, col=1)
+    fig.update_yaxes(title_text="CV % (incerteza)", title_font=dict(color="#9ca3af", size=9), row=2, col=1)
     return fig
 
 
-def grafico_matriz_defensivos(df_def: pd.DataFrame) -> plt.Figure:
+def grafico_matriz_defensivos(df_def: pd.DataFrame) -> go.Figure | None:
     n = min(24, len(df_def))
     if n == 0:
         return None
 
-    colunas_crit = ["Vento\n<10km/h", "Temp\n<30°C", "UR\n≥55%", "Sem\nChuva", "JANELA\nGERAL"]
-    horas = [df_def.index[i].strftime("%Hh") for i in range(n)]
-    M = np.zeros((n, len(colunas_crit)))
+    col_labels = ["Vento<br><10km/h", "Temp<br><30°C", "UR<br>≥55%", "Sem<br>Chuva", "JANELA<br>GERAL"]
+    horas = [df_def.index[i].strftime("%d/%m %Hh") for i in range(n)]
+    M = np.zeros((n, len(col_labels)))
+    text_m = [["" for _ in range(len(col_labels))] for _ in range(n)]
+    hover_m = [["" for _ in range(len(col_labels))] for _ in range(n)]
 
-    for i, (_, row) in enumerate(df_def.head(n).iterrows()):
-        M[i,0] = row["vento_ok"]
-        M[i,1] = row["temp_ok"]
-        M[i,2] = row["ur_ok"]
-        M[i,3] = row["chuva_ok"]
-        M[i,4] = 1 if row["status"]=="aberta" else (0.5 if row["status"]=="parcial" else 0)
+    for i, (idx, row) in enumerate(df_def.head(n).iterrows()):
+        M[i, 0] = row["vento_ok"]
+        M[i, 1] = row["temp_ok"]
+        M[i, 2] = row["ur_ok"]
+        M[i, 3] = row["chuva_ok"]
+        M[i, 4] = 1 if row["status"] == "aberta" else (0.5 if row["status"] == "parcial" else 0)
+        for j in range(len(col_labels)):
+            v = M[i, j]
+            text_m[i][j] = "✓" if v == 1 else ("○" if v == 0.5 else "✗")
+        status_label = {"aberta": "🟢 Aberta", "parcial": "🟡 Parcial", "bloqueada": "🔴 Bloqueada"}.get(row["status"], row["status"])
+        hover_m[i][4] = f"{horas[i]}<br>Status: {status_label}<br>{row['motivo']}"
+        for j in range(4):
+            crit_nome = ["Vento", "Temperatura", "Umidade Relativa", "Precipitação"][j]
+            estado = "✓ OK" if M[i, j] == 1 else "✗ Fora do limite"
+            hover_m[i][j] = f"{horas[i]}<br>{crit_nome}: {estado}<br>{row['motivo']}"
 
-    cmap = mcolors.ListedColormap(["#ef4444","#fbbf24","#22c55e"])
-    norm = mcolors.BoundaryNorm([-0.1, 0.3, 0.7, 1.1], cmap.N)
+    colorscale = [
+        [0.0, "#ef4444"], [0.29, "#ef4444"],
+        [0.30, "#fbbf24"], [0.69, "#fbbf24"],
+        [0.70, "#22c55e"], [1.00, "#22c55e"],
+    ]
 
-    fig, ax = plt.subplots(figsize=(10, max(5, n*0.30)), facecolor=BG_DARK)
-    ax.set_facecolor(BG_DARK)
-    ax.imshow(M, cmap=cmap, norm=norm, aspect="auto")
+    fig = go.Figure(go.Heatmap(
+        z=M, x=col_labels, y=horas,
+        text=text_m, texttemplate="%{text}",
+        textfont=dict(size=11, color="black", family="Montserrat"),
+        colorscale=colorscale, zmin=0, zmax=1, showscale=False,
+        customdata=hover_m,
+        hovertemplate="%{customdata}<extra></extra>",
+        xgap=2, ygap=2,
+    ))
 
-    ax.set_xticks(range(len(colunas_crit)))
-    ax.set_xticklabels(colunas_crit, color="white", fontsize=8.5, fontweight="bold")
-    ax.set_yticks(range(n))
-    ax.set_yticklabels(horas, color="#9ca3af", fontsize=7)
-    ax.set_title("Janela de Aplicação de Defensivos — Próximas 24h",
-                 color="white", fontsize=11, fontweight="bold", pad=10)
-
-    for i in range(n):
-        for j in range(len(colunas_crit)):
-            val = M[i, j]
-            txt = "✓" if val == 1 else ("○" if val == 0.5 else "✗")
-            ax.text(j, i, txt, ha="center", va="center",
-                    fontsize=8, color="#000", fontweight="bold")
-
-    p_v = mpatches.Patch(facecolor="#22c55e", label="✓ Critério atendido / Janela aberta")
-    p_a = mpatches.Patch(facecolor="#fbbf24", label="○ Parcial (1 restrição)")
-    p_r = mpatches.Patch(facecolor="#ef4444", label="✗ Critério bloqueado")
-    ax.legend(handles=[p_v,p_a,p_r], loc="lower right", fontsize=7.5,
-              facecolor=BG_PANEL, labelcolor="white", edgecolor="#374151",
-              bbox_to_anchor=(1.0,-0.06))
-    for sp in ax.spines.values(): sp.set_visible(False)
-    plt.tight_layout(pad=0.8)
+    fig.update_layout(
+        title=dict(text="Janela de Aplicação de Defensivos — Próximas 24h",
+                   font=dict(color="white", size=11, family="Montserrat"), x=0.01),
+        paper_bgcolor=BG_DARK, plot_bgcolor=BG_DARK,
+        font=dict(color="white"),
+        height=max(380, n * 22 + 120),
+        xaxis=dict(side="top", tickfont=dict(size=9, color="white"), showgrid=False),
+        yaxis=dict(tickfont=dict(size=8, color="#9ca3af"), autorange="reversed", showgrid=False),
+        margin=dict(l=90, r=20, t=90, b=20),
+    )
     return fig
 
 
-def grafico_matriz_irrigacao(df_irr: pd.DataFrame) -> plt.Figure:
+def grafico_matriz_irrigacao(df_irr: pd.DataFrame) -> go.Figure | None:
     n = min(48, len(df_irr))
     if n == 0:
         return None
 
-    colunas = ["UR\n(%)", "Temperatura\n(°C)", "ETo\n(mm/h)", "NECESSIDADE\nIRRIGAÇÃO"]
-    horas   = [df_irr.index[i].strftime("%d/%m\n%Hh") for i in range(n)]
-
+    col_labels = ["UR<br>(%)", "Temperatura<br>(°C)", "ETo<br>(mm/h)", "NECESSIDADE<br>IRRIGAÇÃO"]
+    horas = [df_irr.index[i].strftime("%d/%m %Hh") for i in range(n)]
     M = np.zeros((n, 4))
-    for i, (_, row) in enumerate(df_irr.head(n).iterrows()):
-        M[i,0] = 2 - row["ur_nivel"]
-        M[i,1] = 2 - row["tmp_nivel"]
-        M[i,2] = 2 - row["eto_nivel"]
-        M[i,3] = 2 - row["nivel_max"]
+    text_m = [["" for _ in range(4)] for _ in range(n)]
+    hover_m = [["" for _ in range(4)] for _ in range(n)]
+    TEXTOS = {2: "✓", 1: "!", 0: "✗"}
+    STATUS_LABEL = {2: "🟢 Sem necessidade", 1: "🟡 Atenção", 0: "🔴 Irrigar urgente"}
 
-    cmap = mcolors.ListedColormap(["#ef4444","#fbbf24","#22c55e"])
-    norm = mcolors.BoundaryNorm([-0.1, 0.7, 1.3, 2.1], cmap.N)
-
-    fig, ax = plt.subplots(figsize=(9, max(6, n*0.22)), facecolor=BG_DARK)
-    ax.set_facecolor(BG_DARK)
-    ax.imshow(M, cmap=cmap, norm=norm, aspect="auto")
-
-    ax.set_xticks(range(4))
-    ax.set_xticklabels(colunas, color="white", fontsize=8.5, fontweight="bold")
-    ax.set_yticks(range(n))
-    ax.set_yticklabels(horas, color="#9ca3af", fontsize=6.5)
-    ax.set_title("Necessidade de Irrigação — Próximas 48h (parâmetros EMBRAPA)",
-                 color="white", fontsize=11, fontweight="bold", pad=10)
-
-    TEXTS = {2:"✓", 1:"!", 0:"✗"}
-    for i in range(n):
+    for i, (idx, row) in enumerate(df_irr.head(n).iterrows()):
+        M[i, 0] = 2 - row["ur_nivel"]
+        M[i, 1] = 2 - row["tmp_nivel"]
+        M[i, 2] = 2 - row["eto_nivel"]
+        M[i, 3] = 2 - row["nivel_max"]
         for j in range(4):
-            txt = TEXTS.get(int(round(M[i,j])), "?")
-            ax.text(j, i, txt, ha="center", va="center",
-                    fontsize=7.5, color="#000", fontweight="bold")
+            v = int(round(M[i, j]))
+            text_m[i][j] = TEXTOS.get(v, "?")
+            crit_nome = ["Umidade Relativa", "Temperatura", "ETo", "Status Geral"][j]
+            status_str = STATUS_LABEL.get(v, "—")
+            hover_m[i][j] = f"{horas[i]}<br>{crit_nome}: {status_str}<br>{row['motivo_irr']}"
 
-    p_v = mpatches.Patch(facecolor="#22c55e", label="✓ Sem necessidade")
-    p_a = mpatches.Patch(facecolor="#fbbf24", label="! Atenção — monitorar")
-    p_r = mpatches.Patch(facecolor="#ef4444", label="✗ Irrigar urgente")
-    ax.legend(handles=[p_v,p_a,p_r], loc="lower right", fontsize=7.5,
-              facecolor=BG_PANEL, labelcolor="white", edgecolor="#374151",
-              bbox_to_anchor=(1.0,-0.04))
-    for sp in ax.spines.values(): sp.set_visible(False)
-    plt.tight_layout(pad=0.8)
+    colorscale = [
+        [0.0, "#ef4444"], [0.29, "#ef4444"],
+        [0.30, "#fbbf24"], [0.69, "#fbbf24"],
+        [0.70, "#22c55e"], [1.00, "#22c55e"],
+    ]
+
+    fig = go.Figure(go.Heatmap(
+        z=M, x=col_labels, y=horas,
+        text=text_m, texttemplate="%{text}",
+        textfont=dict(size=11, color="black", family="Montserrat"),
+        colorscale=colorscale, zmin=0, zmax=2, showscale=False,
+        customdata=hover_m,
+        hovertemplate="%{customdata}<extra></extra>",
+        xgap=2, ygap=2,
+    ))
+
+    fig.update_layout(
+        title=dict(text="Necessidade de Irrigação — Próximas 48h (parâmetros EMBRAPA)",
+                   font=dict(color="white", size=11, family="Montserrat"), x=0.01),
+        paper_bgcolor=BG_DARK, plot_bgcolor=BG_DARK,
+        font=dict(color="white"),
+        height=max(420, n * 14 + 120),
+        xaxis=dict(side="top", tickfont=dict(size=9, color="white"), showgrid=False),
+        yaxis=dict(tickfont=dict(size=7, color="#9ca3af"), autorange="reversed", showgrid=False),
+        margin=dict(l=100, r=20, t=90, b=20),
+    )
     return fig
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILIDADES DE DADOS / CSV
+# ─────────────────────────────────────────────────────────────────────────────
 
 def df_para_exibir(df: pd.DataFrame, max_rows: int = 168) -> pd.DataFrame:
     if df.empty:
@@ -676,6 +737,20 @@ def df_para_exibir(df: pd.DataFrame, max_rows: int = 168) -> pd.DataFrame:
             lambda x: WCODE.get(int(x), f"Cód {x}") if pd.notna(x) else "—")
         out.drop(columns=[wc_col], inplace=True)
     return out.round(2)
+
+
+def csv_btn(df: pd.DataFrame, label: str, filename: str, key: str):
+    """Renderiza um botão de download CSV para o DataFrame fornecido."""
+    if df.empty:
+        return
+    csv_bytes = df.to_csv().encode("utf-8")
+    st.download_button(
+        label=f"⬇️ Baixar CSV — {label}",
+        data=csv_bytes,
+        file_name=filename,
+        mime="text/csv",
+        key=key,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -709,10 +784,11 @@ def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
     temp_atual   = _v("temperature_2m")
     ur_atual     = _v("relativehumidity_2m", "{:.0f}")
     vento_atual  = _v("windspeed_10m", "{:.0f}")
-    precip_24h   = (f"{df['precipitation'].head(24).sum():.1f}" 
+    precip_24h   = (f"{df['precipitation'].head(24).sum():.1f}"
                     if not df.empty and "precipitation" in df.columns else "—")
-    wc           = int(df["weathercode"].dropna().iloc[0]) if (not df.empty and "weathercode" in df.columns and len(df["weathercode"].dropna()) > 0) else 0
-    condicao     = WCODE.get(wc, "—")
+    wc_s = df["weathercode"].dropna() if "weathercode" in df.columns else pd.Series()
+    wc   = int(wc_s.iloc[0]) if not wc_s.empty else 0
+    condicao = WCODE.get(wc, "—")
 
     bloco_str = "—"
     if res.get("def_bloco_ini") and res.get("def_bloco_fim"):
@@ -720,8 +796,8 @@ def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
                      f"{res['def_bloco_fim'].strftime('%Hh %d/%m')} "
                      f"({res['def_bloco_h']}h consecutivas)")
 
-    irr_status = "🔴 Irrigação urgente" if res.get("irr_urgente",0) > 0 else (
-                 "🟡 Atenção à irrigação" if res.get("irr_atencao",0) > 0 else "🟢 Sem necessidade")
+    irr_status = ("🔴 Irrigação urgente" if res.get("irr_urgente", 0) > 0 else
+                  ("🟡 Atenção à irrigação" if res.get("irr_atencao", 0) > 0 else "🟢 Sem necessidade"))
 
     return f"""
     <html><body style="font-family:Arial,sans-serif;background:#f4f7f4;padding:24px;">
@@ -737,7 +813,6 @@ def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
           📍 {fazenda}</h2>
         <p style="color:#555;font-size:0.85rem;">Cultura: {info['cultura']} | Área: {info['area_ha']:,} ha
           | Lat {info['lat']:.3f}° Lon {info['lon']:.3f}°</p>
-
         <h3 style="color:#1B4D2E;margin-top:20px;">🌡️ Condições Atuais</h3>
         <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
           <tr style="background:#f0f7f0;">
@@ -752,7 +827,6 @@ def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
             <td style="padding:8px 12px;" colspan="4"><b>Condição:</b> {condicao}</td>
           </tr>
         </table>
-
         <h3 style="color:#1B4D2E;margin-top:20px;">🌿 Defensivos (24h) — MAPA/EMBRAPA</h3>
         <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
           <tr style="background:#f0f7f0;">
@@ -766,11 +840,9 @@ def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
             <td style="padding:8px 12px;" colspan="2">{bloco_str}</td>
           </tr>
         </table>
-
         <h3 style="color:#1B4D2E;margin-top:20px;">💧 Irrigação (48h) — EMBRAPA</h3>
         <p style="font-size:0.9rem;">{irr_status} —
           {res.get('irr_urgente',0)} horas críticas · {res.get('irr_atencao',0)} horas de atenção</p>
-
         <hr style="border-color:#ddd;margin:20px 0;">
         <p style="font-size:0.75rem;color:#999;">
           Fonte: Open-Meteo (GFS+ICON) · Parâmetros EMBRAPA/MAPA Portaria 371/2020<br>
@@ -796,31 +868,24 @@ with st.sidebar:
 
     nome_fazenda = st.selectbox("🏡 Fazenda", list(FAZENDAS.keys()), index=0)
     info_faz     = FAZENDAS[nome_fazenda]
-
-    modelo_key   = st.selectbox(
-        "🔭 Modelo Meteorológico",
-        list(MODELOS.keys()),
-        format_func=lambda k: MODELOS[k],
-        index=0,
-    )
-
+    modelo_key   = st.selectbox("🔭 Modelo Meteorológico", list(MODELOS.keys()),
+                                 format_func=lambda k: MODELOS[k], index=0)
     dias_prev    = st.slider("📅 Dias de previsão", 3, 7, 7)
 
     st.markdown("---")
     st.markdown("<div class='secao-titulo' style='color:#a5d6a7;border-color:#3DA63A;'>🔧 Variáveis extras</div>",
                 unsafe_allow_html=True)
-
     VARS_EXTRAS = {
-        "cape":                       "⚡ CAPE (tempestades)",
-        "shortwave_radiation":         "☀️ Radiação Solar",
-        "et0_fao_evapotranspiration":  "💧 ETo Penman-Monteith",
-        "soil_moisture_0_to_1cm":     "🌱 Umidade do Solo",
-        "surface_pressure":           "🔵 Pressão Superficial",
-        "cloudcover":                 "☁️ Cobertura de Nuvens",
+        "cape":                      "⚡ CAPE (tempestades)",
+        "shortwave_radiation":        "☀️ Radiação Solar",
+        "et0_fao_evapotranspiration": "💧 ETo Penman-Monteith",
+        "soil_moisture_0_to_1cm":    "🌱 Umidade do Solo",
+        "surface_pressure":          "🔵 Pressão Superficial",
+        "cloudcover":                "☁️ Cobertura de Nuvens",
     }
     vars_selecionadas = []
     for v, lbl in VARS_EXTRAS.items():
-        if st.checkbox(lbl, value=(v in ["cape","et0_fao_evapotranspiration"]), key=f"chk_{v}"):
+        if st.checkbox(lbl, value=(v in ["cape", "et0_fao_evapotranspiration"]), key=f"chk_{v}"):
             vars_selecionadas.append(v)
 
     st.markdown("---")
@@ -841,14 +906,17 @@ with st.sidebar:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HEADER PRINCIPAL
+# HEADER
 # ─────────────────────────────────────────────────────────────────────────────
 
 agora_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+faz_slug  = nome_fazenda[:30].replace(" ", "_")
+
 st.markdown(f"""
 <div class="yamada-header">
   <h1>🌿 Yamada Engenharia — Agrometeorologia MS</h1>
-  <p>Previsão Open-Meteo (GFS + ICON) · Parâmetros EMBRAPA/MAPA · Atualizado {agora_str}</p>
+  <p>Previsão Open-Meteo (GFS + ICON) · Parâmetros EMBRAPA/MAPA · Atualizado {agora_str}
+     · Gráficos interativos — use o mouse para zoom, pan e hover</p>
 </div>""", unsafe_allow_html=True)
 
 
@@ -863,12 +931,10 @@ with st.spinner("⏳ Buscando previsão Open-Meteo…"):
 if "_erro" in dados_raw:
     st.error(f"❌ Erro na API Open-Meteo: {dados_raw['_erro']}")
     st.stop()
-
 if df_main.empty:
     st.error("❌ Dados não disponíveis. Verifique a conexão e tente novamente.")
     st.stop()
 
-# Ensemble para IC (lazy)
 ensemble_data: dict = {}
 df_ic_temp = df_ic_precip = df_ic_ur = df_ic_vento = pd.DataFrame()
 
@@ -880,30 +946,25 @@ if mostrar_spread:
     df_ic_ur     = ic_entre_modelos(ensemble_data, "relativehumidity_2m")
     df_ic_vento  = ic_entre_modelos(ensemble_data, "windspeed_10m")
 
-# Cálculos EMBRAPA
 df_def = calcular_janela_defensivos(df_main)
 df_irr = calcular_janela_irrigacao(df_main)
 res    = resumo_janelas(df_def, df_irr)
 
-# Condição atual
-wc_atual   = int(df_main["weathercode"].dropna().iloc[0]) if "weathercode" in df_main.columns and len(df_main["weathercode"].dropna()) > 0 else 0
-temp_agora = df_main["temperature_2m"].dropna().iloc[0] if "temperature_2m" in df_main.columns else float("nan")
+wc_s       = df_main["weathercode"].dropna() if "weathercode" in df_main.columns else pd.Series()
+wc_atual   = int(wc_s.iloc[0]) if not wc_s.empty else 0
+temp_agora = df_main["temperature_2m"].dropna().iloc[0]   if "temperature_2m"      in df_main.columns else float("nan")
 ur_agora   = df_main["relativehumidity_2m"].dropna().iloc[0] if "relativehumidity_2m" in df_main.columns else float("nan")
-vento_agora= df_main["windspeed_10m"].dropna().iloc[0] if "windspeed_10m" in df_main.columns else float("nan")
-precip_24h = df_main["precipitation"].head(24).sum() if "precipitation" in df_main.columns else 0.0
+vento_agora= df_main["windspeed_10m"].dropna().iloc[0]    if "windspeed_10m"        in df_main.columns else float("nan")
+precip_24h = df_main["precipitation"].head(24).sum()      if "precipitation"        in df_main.columns else 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MÉTRICAS RÁPIDAS
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ─── MÉTRICAS ─────────────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("🌡️ Temperatura", f"{temp_agora:.1f} °C")
-c2.metric("💧 Umidade Relativa", f"{ur_agora:.0f} %")
-c3.metric("🌬️ Vento", f"{vento_agora:.0f} km/h")
-c4.metric("🌧️ Precip. 24h", f"{precip_24h:.1f} mm")
-c5.metric("🌤️ Condição", WCODE.get(wc_atual, f"Cód {wc_atual}"))
-
+c1.metric("🌡️ Temperatura",       f"{temp_agora:.1f} °C")
+c2.metric("💧 Umidade Relativa",  f"{ur_agora:.0f} %")
+c3.metric("🌬️ Vento",             f"{vento_agora:.0f} km/h")
+c4.metric("🌧️ Precip. 24h",       f"{precip_24h:.1f} mm")
+c5.metric("🌤️ Condição",          WCODE.get(wc_atual, f"Cód {wc_atual}"))
 st.markdown("---")
 
 
@@ -928,20 +989,10 @@ tabs = st.tabs([
 with tabs[0]:
     st.markdown("<div class='secao-titulo'>📋 Síntese Operacional</div>", unsafe_allow_html=True)
 
-    # Cards de resumo
     col_a, col_b, col_c, col_d = st.columns(4)
-
-    # Defensivos
     pct_ab = res["def_abertas"] / 24 * 100
-    if res["def_abertas"] >= 6:
-        cls_d = "alert-verde"
-        icn_d = "🟢"
-    elif res["def_abertas"] >= 2:
-        cls_d = "alert-amarelo"
-        icn_d = "🟡"
-    else:
-        cls_d = "alert-vermelho"
-        icn_d = "🔴"
+    cls_d  = "alert-verde" if res["def_abertas"] >= 6 else ("alert-amarelo" if res["def_abertas"] >= 2 else "alert-vermelho")
+    icn_d  = "🟢" if res["def_abertas"] >= 6 else ("🟡" if res["def_abertas"] >= 2 else "🔴")
 
     col_a.markdown(f"""
     <div class='{cls_d}'>
@@ -949,7 +1000,6 @@ with tabs[0]:
       <span style='font-size:1.6rem;font-weight:900;'>{res['def_abertas']}h</span>
       <span style='font-size:0.8rem;'> / 24h ({pct_ab:.0f}%)</span>
     </div>""", unsafe_allow_html=True)
-
     col_b.markdown(f"""
     <div class='alert-amarelo'>
       <b>🟡 Defensivos — Parciais</b><br>
@@ -957,29 +1007,18 @@ with tabs[0]:
       <span style='font-size:0.8rem;'> / 24h</span>
     </div>""", unsafe_allow_html=True)
 
-    # Melhor bloco
-    if res["def_bloco_ini"] and res["def_bloco_h"] > 0:
-        bloco_txt = (f"{res['def_bloco_ini'].strftime('%Hh')} → "
-                     f"{res['def_bloco_fim'].strftime('%Hh')} "
-                     f"({res['def_bloco_h']}h)")
-    else:
-        bloco_txt = "Sem janela contínua"
+    bloco_txt = (f"{res['def_bloco_ini'].strftime('%Hh')} → {res['def_bloco_fim'].strftime('%Hh')} ({res['def_bloco_h']}h)"
+                 if res["def_bloco_ini"] and res["def_bloco_h"] > 0 else "Sem janela contínua")
     col_c.markdown(f"""
     <div class='alert-azul'>
       <b>📅 Melhor janela contínua</b><br>
       <span style='font-size:0.95rem;font-weight:700;'>{bloco_txt}</span>
     </div>""", unsafe_allow_html=True)
 
-    # Irrigação
-    if res["irr_urgente"] > 0:
-        cls_i = "alert-vermelho"; icn_i = "🔴"
-        irr_txt = f"Irrigar urgente: {res['irr_urgente']}h"
-    elif res["irr_atencao"] > 0:
-        cls_i = "alert-amarelo"; icn_i = "🟡"
-        irr_txt = f"Atenção: {res['irr_atencao']}h"
-    else:
-        cls_i = "alert-verde"; icn_i = "🟢"
-        irr_txt = "Sem necessidade hídrica"
+    cls_i  = "alert-vermelho" if res["irr_urgente"] > 0 else ("alert-amarelo" if res["irr_atencao"] > 0 else "alert-verde")
+    icn_i  = "🔴" if res["irr_urgente"] > 0 else ("🟡" if res["irr_atencao"] > 0 else "🟢")
+    irr_txt= f"Irrigar urgente: {res['irr_urgente']}h" if res["irr_urgente"] > 0 else (
+             f"Atenção: {res['irr_atencao']}h" if res["irr_atencao"] > 0 else "Sem necessidade hídrica")
     col_d.markdown(f"""
     <div class='{cls_i}'>
       <b>{icn_i} Irrigação (48h)</b><br>
@@ -988,44 +1027,51 @@ with tabs[0]:
 
     st.markdown("---")
 
-    # Matrizes
-    col_m1, col_m2 = st.columns([1, 1])
+    col_m1, col_m2 = st.columns(2)
 
     with col_m1:
-        st.markdown("<div class='secao-titulo'>🌿 Janela de Defensivos — 24h</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='secao-titulo'>🌿 Janela de Defensivos — 24h</div>", unsafe_allow_html=True)
         st.markdown("""
         <div class='info-card'>
           <h4>Critérios MAPA Portaria 371/2020 + EMBRAPA Soja</h4>
-          <p>Vento &lt; 10 km/h · Temp &lt; 30°C · UR ≥ 55% · Sem precipitação</p>
+          <p>Vento &lt; 10 km/h · Temp &lt; 30°C · UR ≥ 55% · Sem precipitação
+             <br><small>💡 Passe o mouse sobre as células para ver detalhes de cada hora</small></p>
         </div>""", unsafe_allow_html=True)
         fig_def = grafico_matriz_defensivos(df_def)
         if fig_def:
-            st.pyplot(fig_def, use_container_width=True)
-            plt.close(fig_def)
+            st.plotly_chart(fig_def, use_container_width=True)
+
+        # CSV da janela de defensivos
+        df_def_export = df_def.copy()
+        df_def_export.index = df_def_export.index.strftime("%d/%m %Hh")
+        df_def_export.index.name = "Data/Hora"
+        csv_btn(df_def_export, "Janela Defensivos 24h",
+                f"defensivos_{faz_slug}_{agora_str[:10]}.csv", "csv_def")
 
     with col_m2:
-        st.markdown("<div class='secao-titulo'>💧 Necessidade de Irrigação — 48h</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='secao-titulo'>💧 Necessidade de Irrigação — 48h</div>", unsafe_allow_html=True)
         st.markdown("""
         <div class='info-card'>
           <h4>Critérios EMBRAPA Cerrados — Gomes (2014)</h4>
-          <p>UR, Temperatura e ETo Penman-Monteith classificados em 3 níveis de demanda hídrica</p>
+          <p>UR, Temperatura e ETo Penman-Monteith classificados em 3 níveis de demanda hídrica
+             <br><small>💡 Passe o mouse sobre as células para ver o motivo de cada status</small></p>
         </div>""", unsafe_allow_html=True)
         fig_irr = grafico_matriz_irrigacao(df_irr)
         if fig_irr:
-            st.pyplot(fig_irr, use_container_width=True)
-            plt.close(fig_irr)
+            st.plotly_chart(fig_irr, use_container_width=True)
 
-    # Variáveis extras selecionadas
+        # CSV da irrigação
+        df_irr_export = df_irr.copy()
+        df_irr_export.index = df_irr_export.index.strftime("%d/%m %Hh")
+        df_irr_export.index.name = "Data/Hora"
+        csv_btn(df_irr_export, "Necessidade Irrigação 48h",
+                f"irrigacao_{faz_slug}_{agora_str[:10]}.csv", "csv_irr")
+
     if vars_selecionadas:
         st.markdown("---")
-        st.markdown("<div class='secao-titulo'>📊 Variáveis Complementares</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='secao-titulo'>📊 Variáveis Complementares</div>", unsafe_allow_html=True)
         for var in vars_selecionadas:
-            fig_e = grafico_variavel(df_main, var)
-            st.pyplot(fig_e, use_container_width=True)
-            plt.close(fig_e)
+            st.plotly_chart(grafico_variavel(df_main, var), use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1035,27 +1081,23 @@ with tabs[0]:
 with tabs[1]:
     st.markdown("<div class='secao-titulo'>🌧️ Precipitação</div>", unsafe_allow_html=True)
 
-    # Estatísticas rápidas
     if "precipitation" in df_main.columns:
         precip_s = df_main["precipitation"].dropna()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total 24h",  f"{precip_s.head(24).sum():.1f} mm")
-        c2.metric("Total 48h",  f"{precip_s.head(48).sum():.1f} mm")
+        c1.metric("Total 24h",    f"{precip_s.head(24).sum():.1f} mm")
+        c2.metric("Total 48h",    f"{precip_s.head(48).sum():.1f} mm")
         c3.metric("Total 7 dias", f"{precip_s.sum():.1f} mm")
-        c4.metric("Máx horário", f"{precip_s.max():.1f} mm/h")
+        c4.metric("Máx horário",  f"{precip_s.max():.1f} mm/h")
 
-    fig_p = grafico_variavel(df_main, "precipitation",
-                             df_ic_precip if mostrar_spread else None)
-    st.pyplot(fig_p, use_container_width=True)
-    plt.close(fig_p)
+    st.plotly_chart(grafico_variavel(df_main, "precipitation",
+                    df_ic_precip if mostrar_spread else None),
+                    use_container_width=True)
 
     if mostrar_spread and ensemble_data:
         fig_sp = grafico_spread(ensemble_data, "precipitation")
         if fig_sp:
-            st.pyplot(fig_sp, use_container_width=True)
-            plt.close(fig_sp)
+            st.plotly_chart(fig_sp, use_container_width=True)
 
-    # Tabela diária de chuva acumulada
     if "precipitation" in df_main.columns:
         st.markdown("<div class='secao-titulo'>📅 Acumulado Diário</div>", unsafe_allow_html=True)
         diario = df_main["precipitation"].resample("D").sum().reset_index()
@@ -1064,18 +1106,24 @@ with tabs[1]:
         diario["Precipitação (mm)"] = diario["Precipitação (mm)"].round(1)
         st.dataframe(diario, use_container_width=True, hide_index=True)
 
-    # CAPE
     if "cape" in df_main.columns:
-        st.markdown("<div class='secao-titulo'>⚡ CAPE — Energia Convectiva Disponível</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='secao-titulo'>⚡ CAPE — Energia Convectiva Disponível</div>", unsafe_allow_html=True)
         st.markdown("""
         <div class='info-card'>
           <h4>Referência: CAPE como proxy de tempestades</h4>
           <p>CAPE &lt; 500 J/kg: baixo risco · 500–1500: moderado · 1500–2500: alto · &gt;2500: extremo</p>
         </div>""", unsafe_allow_html=True)
-        fig_cape = grafico_variavel(df_main, "cape")
-        st.pyplot(fig_cape, use_container_width=True)
-        plt.close(fig_cape)
+        st.plotly_chart(grafico_variavel(df_main, "cape"), use_container_width=True)
+
+    # ── CSV da aba ──
+    st.markdown("---")
+    cols_precip = [c for c in ["precipitation", "cape", "weathercode"] if c in df_main.columns]
+    if cols_precip:
+        df_p_exp = df_main[cols_precip].copy()
+        df_p_exp.index = df_p_exp.index.strftime("%d/%m %Hh")
+        df_p_exp.columns = [LABELS.get(c, c) for c in cols_precip]
+        csv_btn(df_p_exp, "Precipitação & CAPE",
+                f"precipitacao_{faz_slug}_{agora_str[:10]}.csv", "csv_precip")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1088,36 +1136,37 @@ with tabs[2]:
     if "temperature_2m" in df_main.columns:
         ts = df_main["temperature_2m"].dropna()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Atual",  f"{ts.iloc[0]:.1f} °C")
-        c2.metric("Máxima 7d", f"{ts.max():.1f} °C")
-        c3.metric("Mínima 7d", f"{ts.min():.1f} °C")
-        c4.metric("Média 7d",  f"{ts.mean():.1f} °C")
+        c1.metric("Atual",      f"{ts.iloc[0]:.1f} °C")
+        c2.metric("Máxima 7d",  f"{ts.max():.1f} °C")
+        c3.metric("Mínima 7d",  f"{ts.min():.1f} °C")
+        c4.metric("Média 7d",   f"{ts.mean():.1f} °C")
 
-    fig_t = grafico_variavel(df_main, "temperature_2m",
-                             df_ic_temp if mostrar_spread else None)
-    st.pyplot(fig_t, use_container_width=True)
-    plt.close(fig_t)
+    st.plotly_chart(grafico_variavel(df_main, "temperature_2m",
+                    df_ic_temp if mostrar_spread else None),
+                    use_container_width=True)
 
     if mostrar_spread and ensemble_data:
         fig_st = grafico_spread(ensemble_data, "temperature_2m")
         if fig_st:
-            st.pyplot(fig_st, use_container_width=True)
-            plt.close(fig_st)
+            st.plotly_chart(fig_st, use_container_width=True)
 
-    # Ponto de orvalho
     if "dewpoint_2m" in df_main.columns:
         st.markdown("<div class='secao-titulo'>🌫️ Ponto de Orvalho</div>", unsafe_allow_html=True)
-        fig_dew = grafico_variavel(df_main, "dewpoint_2m")
-        st.pyplot(fig_dew, use_container_width=True)
-        plt.close(fig_dew)
+        st.plotly_chart(grafico_variavel(df_main, "dewpoint_2m"), use_container_width=True)
 
-    # Radiação solar
     if "shortwave_radiation" in df_main.columns:
-        st.markdown("<div class='secao-titulo'>☀️ Radiação Solar de Onda Curta</div>",
-                    unsafe_allow_html=True)
-        fig_rad = grafico_variavel(df_main, "shortwave_radiation")
-        st.pyplot(fig_rad, use_container_width=True)
-        plt.close(fig_rad)
+        st.markdown("<div class='secao-titulo'>☀️ Radiação Solar de Onda Curta</div>", unsafe_allow_html=True)
+        st.plotly_chart(grafico_variavel(df_main, "shortwave_radiation"), use_container_width=True)
+
+    # ── CSV da aba ──
+    st.markdown("---")
+    cols_temp = [c for c in ["temperature_2m", "dewpoint_2m", "shortwave_radiation"] if c in df_main.columns]
+    if cols_temp:
+        df_t_exp = df_main[cols_temp].copy()
+        df_t_exp.index = df_t_exp.index.strftime("%d/%m %Hh")
+        df_t_exp.columns = [LABELS.get(c, c) for c in cols_temp]
+        csv_btn(df_t_exp, "Temperatura & Radiação",
+                f"temperatura_{faz_slug}_{agora_str[:10]}.csv", "csv_temp")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1130,44 +1179,42 @@ with tabs[3]:
     if "relativehumidity_2m" in df_main.columns:
         ur_s = df_main["relativehumidity_2m"].dropna()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Atual",    f"{ur_s.iloc[0]:.0f} %")
-        c2.metric("Mínima 7d", f"{ur_s.min():.0f} %")
-        c3.metric("Máxima 7d", f"{ur_s.max():.0f} %")
-        horas_baixa = int((ur_s < IRR_UR_BAIXA).sum())
-        c4.metric(f"Horas < {IRR_UR_BAIXA:.0f}%", f"{horas_baixa}h")
+        c1.metric("Atual",      f"{ur_s.iloc[0]:.0f} %")
+        c2.metric("Mínima 7d",  f"{ur_s.min():.0f} %")
+        c3.metric("Máxima 7d",  f"{ur_s.max():.0f} %")
+        c4.metric(f"Horas < {IRR_UR_BAIXA:.0f}%", f"{int((ur_s < IRR_UR_BAIXA).sum())}h")
 
-    fig_ur = grafico_variavel(df_main, "relativehumidity_2m",
-                              df_ic_ur if mostrar_spread else None)
-    st.pyplot(fig_ur, use_container_width=True)
-    plt.close(fig_ur)
+    st.plotly_chart(grafico_variavel(df_main, "relativehumidity_2m",
+                    df_ic_ur if mostrar_spread else None),
+                    use_container_width=True)
 
     if mostrar_spread and ensemble_data:
         fig_sur = grafico_spread(ensemble_data, "relativehumidity_2m")
         if fig_sur:
-            st.pyplot(fig_sur, use_container_width=True)
-            plt.close(fig_sur)
+            st.plotly_chart(fig_sur, use_container_width=True)
 
-    # ETo
     if "et0_fao_evapotranspiration" in df_main.columns:
-        st.markdown("<div class='secao-titulo'>🌿 Evapotranspiração de Referência (ETo)</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='secao-titulo'>🌿 Evapotranspiração de Referência (ETo)</div>", unsafe_allow_html=True)
         st.markdown("""
         <div class='info-card'>
           <h4>ETo Penman-Monteith — FAO-56</h4>
-          <p>Demanda evapotranspirativa horária. ETo &gt; 0.25 mm/h: atenção à irrigação.
-             ETo &gt; 0.40 mm/h: elevada — irrigar.</p>
+          <p>Demanda evapotranspirativa horária. ETo &gt; 0.25 mm/h: atenção à irrigação. ETo &gt; 0.40 mm/h: elevada — irrigar.</p>
         </div>""", unsafe_allow_html=True)
-        fig_eto = grafico_variavel(df_main, "et0_fao_evapotranspiration")
-        st.pyplot(fig_eto, use_container_width=True)
-        plt.close(fig_eto)
+        st.plotly_chart(grafico_variavel(df_main, "et0_fao_evapotranspiration"), use_container_width=True)
 
-    # Umidade do solo
     if "soil_moisture_0_to_1cm" in df_main.columns:
-        st.markdown("<div class='secao-titulo'>🌱 Umidade do Solo (0–1 cm)</div>",
-                    unsafe_allow_html=True)
-        fig_sm = grafico_variavel(df_main, "soil_moisture_0_to_1cm")
-        st.pyplot(fig_sm, use_container_width=True)
-        plt.close(fig_sm)
+        st.markdown("<div class='secao-titulo'>🌱 Umidade do Solo (0–1 cm)</div>", unsafe_allow_html=True)
+        st.plotly_chart(grafico_variavel(df_main, "soil_moisture_0_to_1cm"), use_container_width=True)
+
+    # ── CSV da aba ──
+    st.markdown("---")
+    cols_ur = [c for c in ["relativehumidity_2m", "et0_fao_evapotranspiration", "soil_moisture_0_to_1cm"] if c in df_main.columns]
+    if cols_ur:
+        df_ur_exp = df_main[cols_ur].copy()
+        df_ur_exp.index = df_ur_exp.index.strftime("%d/%m %Hh")
+        df_ur_exp.columns = [LABELS.get(c, c) for c in cols_ur]
+        csv_btn(df_ur_exp, "Umidade, ETo & Solo",
+                f"umidade_{faz_slug}_{agora_str[:10]}.csv", "csv_ur")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1180,47 +1227,43 @@ with tabs[4]:
     if "windspeed_10m" in df_main.columns:
         ws = df_main["windspeed_10m"].dropna()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Atual",    f"{ws.iloc[0]:.0f} km/h")
-        c2.metric("Máximo 7d", f"{ws.max():.0f} km/h")
-        c3.metric("Média 7d",  f"{ws.mean():.1f} km/h")
-        horas_lim = int((ws < DEF_VENTO_MAX).sum())
-        c4.metric(f"Horas < {DEF_VENTO_MAX:.0f} km/h", f"{horas_lim}h")
+        c1.metric("Atual",      f"{ws.iloc[0]:.0f} km/h")
+        c2.metric("Máximo 7d",  f"{ws.max():.0f} km/h")
+        c3.metric("Média 7d",   f"{ws.mean():.1f} km/h")
+        c4.metric(f"Horas < {DEF_VENTO_MAX:.0f} km/h", f"{int((ws < DEF_VENTO_MAX).sum())}h")
 
-    # Velocidade
-    fig_w = grafico_variavel(df_main, "windspeed_10m",
-                             df_ic_vento if mostrar_spread else None)
-    st.pyplot(fig_w, use_container_width=True)
-    plt.close(fig_w)
+    st.plotly_chart(grafico_variavel(df_main, "windspeed_10m",
+                    df_ic_vento if mostrar_spread else None),
+                    use_container_width=True)
 
     if mostrar_spread and ensemble_data:
         fig_sw = grafico_spread(ensemble_data, "windspeed_10m")
         if fig_sw:
-            st.pyplot(fig_sw, use_container_width=True)
-            plt.close(fig_sw)
+            st.plotly_chart(fig_sw, use_container_width=True)
 
-    # Rajadas
     if "windgusts_10m" in df_main.columns:
         st.markdown("<div class='secao-titulo'>💨 Rajadas de Vento</div>", unsafe_allow_html=True)
-        fig_wg = grafico_variavel(df_main, "windgusts_10m")
-        st.pyplot(fig_wg, use_container_width=True)
-        plt.close(fig_wg)
+        st.plotly_chart(grafico_variavel(df_main, "windgusts_10m"), use_container_width=True)
 
-    # Pressão e nebulosidade
     col_p, col_c = st.columns(2)
     with col_p:
         if "surface_pressure" in df_main.columns:
-            st.markdown("<div class='secao-titulo'>🔵 Pressão Superficial</div>",
-                        unsafe_allow_html=True)
-            fig_prs = grafico_variavel(df_main, "surface_pressure")
-            st.pyplot(fig_prs, use_container_width=True)
-            plt.close(fig_prs)
+            st.markdown("<div class='secao-titulo'>🔵 Pressão Superficial</div>", unsafe_allow_html=True)
+            st.plotly_chart(grafico_variavel(df_main, "surface_pressure"), use_container_width=True)
     with col_c:
         if "cloudcover" in df_main.columns:
-            st.markdown("<div class='secao-titulo'>☁️ Cobertura de Nuvens</div>",
-                        unsafe_allow_html=True)
-            fig_cc = grafico_variavel(df_main, "cloudcover")
-            st.pyplot(fig_cc, use_container_width=True)
-            plt.close(fig_cc)
+            st.markdown("<div class='secao-titulo'>☁️ Cobertura de Nuvens</div>", unsafe_allow_html=True)
+            st.plotly_chart(grafico_variavel(df_main, "cloudcover"), use_container_width=True)
+
+    # ── CSV da aba ──
+    st.markdown("---")
+    cols_vento = [c for c in ["windspeed_10m", "windgusts_10m", "surface_pressure", "cloudcover"] if c in df_main.columns]
+    if cols_vento:
+        df_v_exp = df_main[cols_vento].copy()
+        df_v_exp.index = df_v_exp.index.strftime("%d/%m %Hh")
+        df_v_exp.columns = [LABELS.get(c, c) for c in cols_vento]
+        csv_btn(df_v_exp, "Vento, Pressão & Nuvens",
+                f"vento_{faz_slug}_{agora_str[:10]}.csv", "csv_vento")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1239,16 +1282,12 @@ with tabs[5]:
           <p>Gere o boletim completo da fazenda com todas as análises EMBRAPA/MAPA
              e envie por e-mail para a equipe de campo.</p>
         </div>""", unsafe_allow_html=True)
-
-        html_report = gerar_relatorio_html(
-            nome_fazenda, info_faz, df_main, res, agora_str)
-
+        html_report = gerar_relatorio_html(nome_fazenda, info_faz, df_main, res, agora_str)
         st.markdown("#### Pré-visualização")
         components.html(html_report, height=500, scrolling=True)
 
     with col_r2:
         st.markdown("#### 📧 Envio por E-mail")
-
         if not _EMAIL_OK:
             st.markdown("""
             <div class='alert-amarelo'>
@@ -1257,16 +1296,11 @@ with tabs[5]:
               <code>[email]<br>
               remetente = "seu@gmail.com"<br>
               senha_app = "xxxx xxxx xxxx xxxx"<br>
-              destinatario = "dest1@ex.com, dest2@ex.com"</code>
+              destinatario = "dest1@ex.com"</code>
             </div>""", unsafe_allow_html=True)
         else:
-            dest_input = st.text_input(
-                "Destinatários (separados por vírgula)",
-                value=", ".join(_EMAIL_DEST))
-            assunto_input = st.text_input(
-                "Assunto",
-                value=f"Boletim Agrometeorológico — {nome_fazenda[:40]} — {agora_str}")
-
+            dest_input   = st.text_input("Destinatários (separados por vírgula)", value=", ".join(_EMAIL_DEST))
+            assunto_input= st.text_input("Assunto", value=f"Boletim Agrometeorológico — {nome_fazenda[:40]} — {agora_str}")
             if st.button("📨 Enviar Boletim"):
                 dests = [e.strip() for e in dest_input.split(",") if e.strip()]
                 if not dests:
@@ -1274,23 +1308,16 @@ with tabs[5]:
                 else:
                     with st.spinner("Enviando…"):
                         ok, msg_r = enviar_email(assunto_input, html_report, dests)
-                    if ok:
-                        st.success(f"✅ {msg_r}")
-                    else:
-                        st.error(f"❌ Erro: {msg_r}")
+                    if ok: st.success(f"✅ {msg_r}")
+                    else:  st.error(f"❌ Erro: {msg_r}")
 
         st.markdown("---")
-        st.markdown("#### 📊 Tabela de Dados Brutos")
+        st.markdown("#### 📊 Tabela de Dados Brutos — Todos os Campos")
         df_exib = df_para_exibir(df_main)
         if not df_exib.empty:
-            st.dataframe(df_exib, use_container_width=True, height=340)
-            csv_bytes = df_exib.to_csv().encode("utf-8")
-            st.download_button(
-                label="⬇️ Baixar CSV",
-                data=csv_bytes,
-                file_name=f"yamada_previsao_{nome_fazenda[:30].replace(' ','_')}_{agora_str[:10]}.csv",
-                mime="text/csv",
-            )
+            st.dataframe(df_exib, use_container_width=True, height=320)
+            csv_btn(df_exib, "Todos os dados brutos",
+                    f"yamada_completo_{faz_slug}_{agora_str[:10]}.csv", "csv_full")
 
     # Referências
     st.markdown("---")
@@ -1301,10 +1328,10 @@ with tabs[5]:
       <p>
         • <b>Open-Meteo</b>: Zippenfenig, P. (2023). Open-Meteo.com Weather API. Zenodo. doi:10.5281/zenodo.7970649<br>
         • <b>GFS</b>: NOAA/NCEP Global Forecast System — 0.25° resolução<br>
-        • <b>ICON</b>: Zängl, G. et al. (2015). The ICON (ICOsahedral Non-hydrostatic) modelling framework. Q. J. R. Meteorol. Soc., 141:563–579<br>
+        • <b>ICON</b>: Zängl, G. et al. (2015). The ICON modelling framework. Q. J. R. Meteorol. Soc., 141:563–579<br>
         • <b>Defensivos</b>: MAPA Portaria 371/2020 + EMBRAPA Soja (2022) — Tecnologia de Aplicação<br>
         • <b>Irrigação</b>: Gomes, H.P. (2014). EMBRAPA Cerrados — Manejo de Irrigação no Cerrado<br>
         • <b>ETo</b>: Allen, R.G. et al. (1998). FAO Irrigation and Drainage Paper 56 — Penman-Monteith<br>
-        • <b>CAPE</b>: Doswell, C.A. & Rasmussen, E.N. (1994). The Effect of Neglecting the Virtual Temperature Correction on CAPE Calculations. Wea. Forecasting, 9:625–629
+        • <b>CAPE</b>: Doswell, C.A. & Rasmussen, E.N. (1994). Wea. Forecasting, 9:625–629
       </p>
     </div>""", unsafe_allow_html=True)
