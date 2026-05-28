@@ -1,3 +1,25 @@
+"""
+=============================================================================
+YAMADA ENGENHARIA — Agrometeorologia para Fazendas do MS  v6.0
+=============================================================================
+Novidades v6.0:
+  • Todos os gráficos agora são INTERATIVOS (Plotly) — hover, zoom, pan
+  • Botões de download CSV em cada aba (dados da aba específica)
+  • Matrizes de defensivos e irrigação também interativas (heatmap Plotly)
+  • Spread entre modelos com subplots interativos
+=============================================================================
+Estrutura:
+  • Sidebar  : seleciona fazenda mock + modelo + variáveis
+  • Aba 0 ★  : Síntese   — matrizes defensivos + irrigação (padrão EMBRAPA)
+  • Aba 1    : Precipitação
+  • Aba 2    : Temperatura
+  • Aba 3    : Umidade Relativa
+  • Aba 4    : Vento
+  • Aba 5    : Relatório & E-mail
+Fonte única: Open-Meteo (GFS + ICON — melhores para convecção subtropical MS)
+=============================================================================
+"""
+
 # ─── IMPORTS ──────────────────────────────────────────────────────────────────
 import streamlit as st
 import streamlit.components.v1 as components
@@ -505,11 +527,16 @@ def grafico_variavel(df: pd.DataFrame, var: str,
             annotation_font=dict(color=cor_l, size=8),
         )
 
-    fig.update_layout(
-        yaxis_title=label,
-        yaxis_titlefont=dict(color="#9ca3af", size=9),
+    # ── CORREÇÃO: configurar eixo X via update_xaxes (não via update_layout) ──
+    fig.update_yaxes(
+        title_text=label,
+        title_font=dict(color="#9ca3af", size=9),
     )
-    fig.update_xaxes(tickformat="%d/%m\n%Hh", dtick=6 * 3600000)
+    fig.update_xaxes(
+        tickformat="%d/%m\n%Hh",
+        dtick=6 * 3600000,
+    )
+
     return _plotly_layout(fig, title, height=340)
 
 
