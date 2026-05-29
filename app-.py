@@ -1,11 +1,17 @@
 """
 =============================================================================
-YAMADA ENGENHARIA — Agrometeorologia para Fazendas do MS  v6.0
+YAMADA ENGENHARIA — Agrometeorologia para Fazendas do MS  v6.1
 =============================================================================
-Novidades v6.0:
-  • Todos os gráficos agora são INTERATIVOS (Plotly) — hover, zoom, pan
-  • Botões de download CSV em cada aba (dados da aba específica)
-  • Matrizes de defensivos e irrigação também interativas (heatmap Plotly)
+Correções v6.1:
+  • CORRIGIDO: StreamlitDuplicateElementId — key= único em todos st.plotly_chart()
+  • CORRIGIDO: Textos invisíveis nas caixas de alerta da aba Síntese (cor preta explícita)
+  • CORRIGIDO: E-mail agora inclui tabelas completas de Defensivos e Irrigação
+  • CORRIGIDO: CSS alert-* força color:#1a1a1a em todos os textos filhos
+=============================================================================
+Novidades v6.0 (mantidas):
+  • Todos os gráficos são INTERATIVOS (Plotly) — hover, zoom, pan
+  • Botões de download CSV em cada aba
+  • Matrizes de defensivos e irrigação interativas (heatmap Plotly)
   • Spread entre modelos com subplots interativos
 =============================================================================
 Estrutura:
@@ -52,6 +58,8 @@ BG_DARK       = "#0d1117"
 BG_PANEL      = "#111827"
 
 # ─── CSS ──────────────────────────────────────────────────────────────────────
+# CORREÇÃO: alert-* agora força color:#1a1a1a em todos os elementos filhos
+# para garantir legibilidade independente do tema Streamlit
 CSS = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;900&family=Source+Sans+3:wght@300;400;600&display=swap');
@@ -73,16 +81,32 @@ html, body, [class*="css"] {{
 .info-card {{
   background:white; border-left:4px solid {VERDE_MEDIO}; border-radius:8px;
   padding:14px 18px; margin-bottom:10px; box-shadow:0 2px 8px rgba(0,0,0,0.06);
+  color:{PRETO} !important;
 }}
 .info-card h4 {{
-  font-family:'Montserrat',sans-serif; font-weight:700; color:{VERDE_ESCURO};
+  font-family:'Montserrat',sans-serif; font-weight:700; color:{VERDE_ESCURO} !important;
   margin:0 0 4px 0; font-size:0.88rem;
 }}
-.info-card p {{ margin:0; font-size:0.82rem; color:#333; line-height:1.45; }}
-.alert-verde    {{background:#e8f5e9;border-left:4px solid #43a047;border-radius:8px;padding:12px 16px;margin:6px 0;}}
-.alert-amarelo  {{background:#fff8e1;border-left:4px solid #fbc02d;border-radius:8px;padding:12px 16px;margin:6px 0;}}
-.alert-vermelho {{background:#ffebee;border-left:4px solid #e53935;border-radius:8px;padding:12px 16px;margin:6px 0;}}
-.alert-azul     {{background:#e3f2fd;border-left:4px solid #1565c0;border-radius:8px;padding:12px 16px;margin:6px 0;}}
+.info-card p {{ margin:0; font-size:0.82rem; color:#333 !important; line-height:1.45; }}
+
+/* ── CORREÇÃO PRINCIPAL: força texto escuro em todos alert-* ── */
+.alert-verde, .alert-amarelo, .alert-vermelho, .alert-azul {{
+  border-radius:8px; padding:12px 16px; margin:6px 0;
+  color:{PRETO} !important;
+}}
+.alert-verde    {{ background:#e8f5e9; border-left:4px solid #43a047; }}
+.alert-amarelo  {{ background:#fff8e1; border-left:4px solid #fbc02d; }}
+.alert-vermelho {{ background:#ffebee; border-left:4px solid #e53935; }}
+.alert-azul     {{ background:#e3f2fd; border-left:4px solid #1565c0; }}
+
+/* Força todos filhos de alert a herdarem cor escura */
+.alert-verde *,
+.alert-amarelo *,
+.alert-vermelho *,
+.alert-azul * {{
+  color:{PRETO} !important;
+}}
+
 .secao-titulo {{
   font-family:'Montserrat',sans-serif; font-weight:800; font-size:1.05rem;
   color:{VERDE_ESCURO}; border-bottom:2px solid {VERDE_MEDIO};
@@ -426,7 +450,6 @@ def resumo_janelas(df_def: pd.DataFrame, df_irr: pd.DataFrame) -> dict:
 # GRÁFICOS PLOTLY — INTERATIVOS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Limiares por variável
 LIMIARES = {
     "temperature_2m": [
         (5,             "#93c5fd", "Geada (5°C)"),
@@ -462,7 +485,13 @@ LIMIARES = {
 
 def grafico_variavel(df: pd.DataFrame, var: str,
                      df_ic: pd.DataFrame = None,
-                     titulo_extra: str = "") -> go.Figure:
+                     titulo_extra: str = "",
+                     chart_key: str = "") -> go.Figure:
+    """
+    Gera gráfico Plotly para a variável solicitada.
+    chart_key é usado externamente no st.plotly_chart(key=...) para evitar
+    StreamlitDuplicateElementId — não mais necessário aqui, mas mantido por compatibilidade.
+    """
     cor   = CORES.get(var, "#60a5fa")
     label = LABELS.get(var, var)
     title = f"{label}{titulo_extra}"
@@ -527,7 +556,6 @@ def grafico_variavel(df: pd.DataFrame, var: str,
             annotation_font=dict(color=cor_l, size=8),
         )
 
-    # ── CORREÇÃO: configurar eixo X via update_xaxes (não via update_layout) ──
     fig.update_yaxes(
         title_text=label,
         title_font=dict(color="#9ca3af", size=9),
@@ -569,7 +597,6 @@ def grafico_spread(ensemble: dict, var: str) -> go.Figure | None:
         vertical_spacing=0.06,
     )
 
-    # IC 95 e 68
     fig.add_trace(go.Scatter(x=med.index, y=(med + 2*std).values, fill=None,
                              mode="lines", line=dict(color="#60a5fa", width=0),
                              showlegend=False, hoverinfo="skip"), row=1, col=1)
@@ -585,7 +612,6 @@ def grafico_spread(ensemble: dict, var: str) -> go.Figure | None:
                              fillcolor="rgba(96,165,250,0.18)", name="IC 68%",
                              hoverinfo="skip"), row=1, col=1)
 
-    # Modelos individuais
     for nome, s in series.items():
         fig.add_trace(go.Scatter(
             x=s.index, y=s.values, mode="lines", name=nome,
@@ -594,14 +620,12 @@ def grafico_spread(ensemble: dict, var: str) -> go.Figure | None:
             hovertemplate=f"%{{x|%d/%m %Hh}}<br>{nome}: %{{y:.2f}}<extra></extra>",
         ), row=1, col=1)
 
-    # Média
     fig.add_trace(go.Scatter(
         x=med.index, y=med.values, mode="lines", name="Média modelos",
         line=dict(color="white", width=2.4),
         hovertemplate="%{x|%d/%m %Hh}<br>Média: %{y:.2f}<extra></extra>",
     ), row=1, col=1)
 
-    # CV (incerteza)
     cv_colors = ["#22c55e" if v < 10 else ("#fbbf24" if v < 25 else "#ef4444") for v in cv.values]
     fig.add_trace(go.Bar(
         x=cv.index, y=cv.values, name="CV %",
@@ -780,8 +804,94 @@ def csv_btn(df: pd.DataFrame, label: str, filename: str, key: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# E-MAIL
+# E-MAIL — CORREÇÃO: inclui tabelas de Defensivos e Irrigação
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _html_tabela_defensivos(df_def: pd.DataFrame) -> str:
+    """
+    Gera tabela HTML das próximas 24h de janela de defensivos para o e-mail.
+    Usa apenas as primeiras 24 linhas e coloriza por status.
+    """
+    COR_STATUS = {
+        "aberta":    ("#e8f5e9", "#1b5e20", "🟢 Aberta"),
+        "parcial":   ("#fff8e1", "#e65100", "🟡 Parcial"),
+        "bloqueada": ("#ffebee", "#b71c1c", "🔴 Bloqueada"),
+    }
+    linhas = []
+    for idx, row in df_def.head(24).iterrows():
+        hora = idx.strftime("%d/%m %Hh")
+        bg, fg, lbl = COR_STATUS.get(row["status"], ("#fff", "#000", row["status"]))
+        vento_ok = "✓" if row["vento_ok"] else "✗"
+        temp_ok  = "✓" if row["temp_ok"]  else "✗"
+        ur_ok    = "✓" if row["ur_ok"]    else "✗"
+        chuva_ok = "✓" if row["chuva_ok"] else "✗"
+        linhas.append(f"""
+        <tr style="background:{bg};">
+          <td style="padding:5px 8px;font-size:0.78rem;color:#333;">{hora}</td>
+          <td style="padding:5px 8px;font-size:0.78rem;color:#333;text-align:center;">{vento_ok}</td>
+          <td style="padding:5px 8px;font-size:0.78rem;color:#333;text-align:center;">{temp_ok}</td>
+          <td style="padding:5px 8px;font-size:0.78rem;color:#333;text-align:center;">{ur_ok}</td>
+          <td style="padding:5px 8px;font-size:0.78rem;color:#333;text-align:center;">{chuva_ok}</td>
+          <td style="padding:5px 8px;font-size:0.78rem;font-weight:700;color:{fg};">{lbl}</td>
+        </tr>""")
+    return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:8px;">
+      <thead>
+        <tr style="background:#1B4D2E;color:white;">
+          <th style="padding:6px 8px;text-align:left;">Hora</th>
+          <th style="padding:6px 8px;">Vento</th>
+          <th style="padding:6px 8px;">Temp</th>
+          <th style="padding:6px 8px;">UR</th>
+          <th style="padding:6px 8px;">Chuva</th>
+          <th style="padding:6px 8px;text-align:left;">Status</th>
+        </tr>
+      </thead>
+      <tbody>{''.join(linhas)}</tbody>
+    </table>
+    <p style="font-size:0.72rem;color:#888;margin:4px 0 0 0;">
+      Critérios MAPA Portaria 371/2020: Vento &lt;10km/h · Temp &lt;30°C · UR ≥55% · Sem chuva
+    </p>"""
+
+
+def _html_tabela_irrigacao(df_irr: pd.DataFrame) -> str:
+    """
+    Gera tabela HTML das próximas 48h de necessidade de irrigação para o e-mail.
+    Exibe as primeiras 48 linhas agrupadas mostrando status de 6 em 6 horas (máx 12 linhas).
+    """
+    COR_IRR = {
+        "sem_necessidade": ("#e8f5e9", "#1b5e20", "🟢 Sem necessidade"),
+        "atencao":         ("#fff8e1", "#e65100", "🟡 Atenção"),
+        "irrigar":         ("#ffebee", "#b71c1c", "🔴 Irrigar urgente"),
+    }
+    # Mostra de 4 em 4 horas para caber melhor no e-mail (12 pontos em 48h)
+    df_show = df_irr.head(48).iloc[::4]
+    linhas = []
+    for idx, row in df_show.iterrows():
+        hora = idx.strftime("%d/%m %Hh")
+        status = row["status_irr"]
+        bg, fg, lbl = COR_IRR.get(status, ("#fff", "#000", status))
+        motivo = row["motivo_irr"][:60] + "…" if len(row["motivo_irr"]) > 60 else row["motivo_irr"]
+        linhas.append(f"""
+        <tr style="background:{bg};">
+          <td style="padding:5px 8px;font-size:0.78rem;color:#333;">{hora}</td>
+          <td style="padding:5px 8px;font-size:0.78rem;font-weight:700;color:{fg};">{lbl}</td>
+          <td style="padding:5px 8px;font-size:0.72rem;color:#555;">{motivo}</td>
+        </tr>""")
+    return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:8px;">
+      <thead>
+        <tr style="background:#1B4D2E;color:white;">
+          <th style="padding:6px 8px;text-align:left;">Hora</th>
+          <th style="padding:6px 8px;text-align:left;">Necessidade</th>
+          <th style="padding:6px 8px;text-align:left;">Detalhe</th>
+        </tr>
+      </thead>
+      <tbody>{''.join(linhas)}</tbody>
+    </table>
+    <p style="font-size:0.72rem;color:#888;margin:4px 0 0 0;">
+      Critérios EMBRAPA Cerrados — Gomes (2014): UR, Temperatura e ETo Penman-Monteith (FAO-56)
+    </p>"""
+
 
 def enviar_email(assunto: str, corpo_html: str, destinatarios: list) -> tuple[bool, str]:
     if not _EMAIL_OK:
@@ -801,7 +911,13 @@ def enviar_email(assunto: str, corpo_html: str, destinatarios: list) -> tuple[bo
 
 
 def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
-                          res: dict, agora: str) -> str:
+                          res: dict, agora: str,
+                          df_def: pd.DataFrame = None,
+                          df_irr: pd.DataFrame = None) -> str:
+    """
+    Gera o HTML completo do boletim agrometeorológico.
+    CORREÇÃO v6.1: inclui tabelas detalhadas de Defensivos (24h) e Irrigação (48h).
+    """
     def _v(col, fmt="{:.1f}"):
         if df.empty or col not in df.columns: return "—"
         val = df[col].dropna()
@@ -825,50 +941,86 @@ def gerar_relatorio_html(fazenda: str, info: dict, df: pd.DataFrame,
     irr_status = ("🔴 Irrigação urgente" if res.get("irr_urgente", 0) > 0 else
                   ("🟡 Atenção à irrigação" if res.get("irr_atencao", 0) > 0 else "🟢 Sem necessidade"))
 
+    # ── Tabelas detalhadas (NOVO em v6.1) ──
+    html_def = _html_tabela_defensivos(df_def) if df_def is not None and not df_def.empty else "<p>Dados não disponíveis.</p>"
+    html_irr = _html_tabela_irrigacao(df_irr)  if df_irr is not None and not df_irr.empty else "<p>Dados não disponíveis.</p>"
+
     return f"""
     <html><body style="font-family:Arial,sans-serif;background:#f4f7f4;padding:24px;">
-    <div style="max-width:680px;margin:auto;background:white;border-radius:12px;overflow:hidden;
+    <div style="max-width:720px;margin:auto;background:white;border-radius:12px;overflow:hidden;
                 box-shadow:0 4px 20px rgba(0,0,0,0.1);">
+
+      <!-- CABEÇALHO -->
       <div style="background:linear-gradient(135deg,#1B4D2E,#3DA63A);padding:24px 32px;">
         <h1 style="color:white;margin:0;font-size:1.4rem;">🌿 Yamada Engenharia</h1>
         <p style="color:rgba(255,255,255,0.8);margin:4px 0 0 0;font-size:0.85rem;">
           Boletim Agrometeorólogico — {agora}</p>
       </div>
+
       <div style="padding:24px 32px;">
+
+        <!-- IDENTIFICAÇÃO DA FAZENDA -->
         <h2 style="color:#1B4D2E;font-size:1.1rem;border-bottom:2px solid #3DA63A;padding-bottom:6px;">
           📍 {fazenda}</h2>
         <p style="color:#555;font-size:0.85rem;">Cultura: {info['cultura']} | Área: {info['area_ha']:,} ha
           | Lat {info['lat']:.3f}° Lon {info['lon']:.3f}°</p>
+
+        <!-- CONDIÇÕES ATUAIS -->
         <h3 style="color:#1B4D2E;margin-top:20px;">🌡️ Condições Atuais</h3>
         <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
           <tr style="background:#f0f7f0;">
-            <td style="padding:8px 12px;"><b>Temperatura</b></td><td>{temp_atual} °C</td>
-            <td style="padding:8px 12px;"><b>Umidade Relativa</b></td><td>{ur_atual} %</td>
+            <td style="padding:8px 12px;color:#333;"><b>Temperatura</b></td>
+            <td style="color:#333;">{temp_atual} °C</td>
+            <td style="padding:8px 12px;color:#333;"><b>Umidade Relativa</b></td>
+            <td style="color:#333;">{ur_atual} %</td>
           </tr>
           <tr>
-            <td style="padding:8px 12px;"><b>Vento</b></td><td>{vento_atual} km/h</td>
-            <td style="padding:8px 12px;"><b>Precipitação 24h</b></td><td>{precip_24h} mm</td>
+            <td style="padding:8px 12px;color:#333;"><b>Vento</b></td>
+            <td style="color:#333;">{vento_atual} km/h</td>
+            <td style="padding:8px 12px;color:#333;"><b>Precipitação 24h</b></td>
+            <td style="color:#333;">{precip_24h} mm</td>
           </tr>
           <tr style="background:#f0f7f0;">
-            <td style="padding:8px 12px;" colspan="4"><b>Condição:</b> {condicao}</td>
+            <td style="padding:8px 12px;color:#333;" colspan="4"><b>Condição:</b> {condicao}</td>
           </tr>
         </table>
-        <h3 style="color:#1B4D2E;margin-top:20px;">🌿 Defensivos (24h) — MAPA/EMBRAPA</h3>
-        <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+
+        <!-- RESUMO DEFENSIVOS -->
+        <h3 style="color:#1B4D2E;margin-top:24px;">🌿 Resumo — Defensivos (24h)</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:0.88rem;margin-bottom:8px;">
           <tr style="background:#f0f7f0;">
-            <td style="padding:8px 12px;"><b>Horas abertas</b></td>
+            <td style="padding:8px 12px;color:#333;"><b>Horas abertas</b></td>
             <td style="color:#16a34a;font-weight:bold;">{res.get('def_abertas',0)}h</td>
-            <td style="padding:8px 12px;"><b>Horas parciais</b></td>
+            <td style="padding:8px 12px;color:#333;"><b>Horas parciais</b></td>
             <td style="color:#d97706;font-weight:bold;">{res.get('def_parciais',0)}h</td>
+            <td style="padding:8px 12px;color:#333;"><b>Horas bloqueadas</b></td>
+            <td style="color:#dc2626;font-weight:bold;">{res.get('def_bloqueadas',0)}h</td>
           </tr>
           <tr>
-            <td style="padding:8px 12px;" colspan="2"><b>Melhor janela contínua</b></td>
-            <td style="padding:8px 12px;" colspan="2">{bloco_str}</td>
+            <td style="padding:8px 12px;color:#333;" colspan="2"><b>Melhor janela contínua</b></td>
+            <td style="padding:8px 12px;color:#333;" colspan="4">{bloco_str}</td>
           </tr>
         </table>
-        <h3 style="color:#1B4D2E;margin-top:20px;">💧 Irrigação (48h) — EMBRAPA</h3>
-        <p style="font-size:0.9rem;">{irr_status} —
+
+        <!-- TABELA DETALHADA DEFENSIVOS (NOVO v6.1) -->
+        <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:16px;">
+          <p style="margin:0 0 6px 0;font-size:0.85rem;font-weight:bold;color:#1B4D2E;">
+            📋 Janela Hora a Hora — Próximas 24h</p>
+          {html_def}
+        </div>
+
+        <!-- RESUMO IRRIGAÇÃO -->
+        <h3 style="color:#1B4D2E;margin-top:20px;">💧 Resumo — Irrigação (48h)</h3>
+        <p style="font-size:0.9rem;color:#333;">{irr_status} —
           {res.get('irr_urgente',0)} horas críticas · {res.get('irr_atencao',0)} horas de atenção</p>
+
+        <!-- TABELA DETALHADA IRRIGAÇÃO (NOVO v6.1) -->
+        <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:16px;">
+          <p style="margin:0 0 6px 0;font-size:0.85rem;font-weight:bold;color:#1B4D2E;">
+            💧 Necessidade de Irrigação — Próximas 48h (cada 4h)</p>
+          {html_irr}
+        </div>
+
         <hr style="border-color:#ddd;margin:20px 0;">
         <p style="font-size:0.75rem;color:#999;">
           Fonte: Open-Meteo (GFS+ICON) · Parâmetros EMBRAPA/MAPA Portaria 371/2020<br>
@@ -978,10 +1130,10 @@ res    = resumo_janelas(df_def, df_irr)
 
 wc_s       = df_main["weathercode"].dropna() if "weathercode" in df_main.columns else pd.Series()
 wc_atual   = int(wc_s.iloc[0]) if not wc_s.empty else 0
-temp_agora = df_main["temperature_2m"].dropna().iloc[0]   if "temperature_2m"      in df_main.columns else float("nan")
+temp_agora = df_main["temperature_2m"].dropna().iloc[0]      if "temperature_2m"      in df_main.columns else float("nan")
 ur_agora   = df_main["relativehumidity_2m"].dropna().iloc[0] if "relativehumidity_2m" in df_main.columns else float("nan")
-vento_agora= df_main["windspeed_10m"].dropna().iloc[0]    if "windspeed_10m"        in df_main.columns else float("nan")
-precip_24h = df_main["precipitation"].head(24).sum()      if "precipitation"        in df_main.columns else 0.0
+vento_agora= df_main["windspeed_10m"].dropna().iloc[0]       if "windspeed_10m"        in df_main.columns else float("nan")
+precip_24h = df_main["precipitation"].head(24).sum()         if "precipitation"        in df_main.columns else 0.0
 
 
 # ─── MÉTRICAS ─────────────────────────────────────────────────────────────────
@@ -1010,6 +1162,8 @@ tabs = st.tabs([
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ABA 0 — SÍNTESE
+# CORREÇÃO: key= únicos em todos st.plotly_chart()
+# CORREÇÃO: textos das caixas de alerta agora visíveis (color: #1a1a1a forçado no CSS)
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tabs[0]:
@@ -1020,25 +1174,27 @@ with tabs[0]:
     cls_d  = "alert-verde" if res["def_abertas"] >= 6 else ("alert-amarelo" if res["def_abertas"] >= 2 else "alert-vermelho")
     icn_d  = "🟢" if res["def_abertas"] >= 6 else ("🟡" if res["def_abertas"] >= 2 else "🔴")
 
+    # CORREÇÃO: style="color:#1a1a1a !important" adicionado em cada bloco
     col_a.markdown(f"""
     <div class='{cls_d}'>
-      <b>{icn_d} Defensivos — Abertas</b><br>
-      <span style='font-size:1.6rem;font-weight:900;'>{res['def_abertas']}h</span>
-      <span style='font-size:0.8rem;'> / 24h ({pct_ab:.0f}%)</span>
+      <b style="color:#1a1a1a;">{icn_d} Defensivos — Abertas</b><br>
+      <span style='font-size:1.6rem;font-weight:900;color:#1a1a1a;'>{res['def_abertas']}h</span>
+      <span style='font-size:0.8rem;color:#333;'> / 24h ({pct_ab:.0f}%)</span>
     </div>""", unsafe_allow_html=True)
+
     col_b.markdown(f"""
     <div class='alert-amarelo'>
-      <b>🟡 Defensivos — Parciais</b><br>
-      <span style='font-size:1.6rem;font-weight:900;'>{res['def_parciais']}h</span>
-      <span style='font-size:0.8rem;'> / 24h</span>
+      <b style="color:#1a1a1a;">🟡 Defensivos — Parciais</b><br>
+      <span style='font-size:1.6rem;font-weight:900;color:#1a1a1a;'>{res['def_parciais']}h</span>
+      <span style='font-size:0.8rem;color:#333;'> / 24h</span>
     </div>""", unsafe_allow_html=True)
 
     bloco_txt = (f"{res['def_bloco_ini'].strftime('%Hh')} → {res['def_bloco_fim'].strftime('%Hh')} ({res['def_bloco_h']}h)"
                  if res["def_bloco_ini"] and res["def_bloco_h"] > 0 else "Sem janela contínua")
     col_c.markdown(f"""
     <div class='alert-azul'>
-      <b>📅 Melhor janela contínua</b><br>
-      <span style='font-size:0.95rem;font-weight:700;'>{bloco_txt}</span>
+      <b style="color:#1a1a1a;">📅 Melhor janela contínua</b><br>
+      <span style='font-size:0.95rem;font-weight:700;color:#1a1a1a;'>{bloco_txt}</span>
     </div>""", unsafe_allow_html=True)
 
     cls_i  = "alert-vermelho" if res["irr_urgente"] > 0 else ("alert-amarelo" if res["irr_atencao"] > 0 else "alert-verde")
@@ -1047,8 +1203,8 @@ with tabs[0]:
              f"Atenção: {res['irr_atencao']}h" if res["irr_atencao"] > 0 else "Sem necessidade hídrica")
     col_d.markdown(f"""
     <div class='{cls_i}'>
-      <b>{icn_i} Irrigação (48h)</b><br>
-      <span style='font-size:0.95rem;font-weight:700;'>{irr_txt}</span>
+      <b style="color:#1a1a1a;">{icn_i} Irrigação (48h)</b><br>
+      <span style='font-size:0.95rem;font-weight:700;color:#1a1a1a;'>{irr_txt}</span>
     </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
@@ -1065,9 +1221,9 @@ with tabs[0]:
         </div>""", unsafe_allow_html=True)
         fig_def = grafico_matriz_defensivos(df_def)
         if fig_def:
-            st.plotly_chart(fig_def, use_container_width=True)
+            # CORREÇÃO: key= único para evitar StreamlitDuplicateElementId
+            st.plotly_chart(fig_def, use_container_width=True, key="mat_def_sintese")
 
-        # CSV da janela de defensivos
         df_def_export = df_def.copy()
         df_def_export.index = df_def_export.index.strftime("%d/%m %Hh")
         df_def_export.index.name = "Data/Hora"
@@ -1084,9 +1240,9 @@ with tabs[0]:
         </div>""", unsafe_allow_html=True)
         fig_irr = grafico_matriz_irrigacao(df_irr)
         if fig_irr:
-            st.plotly_chart(fig_irr, use_container_width=True)
+            # CORREÇÃO: key= único
+            st.plotly_chart(fig_irr, use_container_width=True, key="mat_irr_sintese")
 
-        # CSV da irrigação
         df_irr_export = df_irr.copy()
         df_irr_export.index = df_irr_export.index.strftime("%d/%m %Hh")
         df_irr_export.index.name = "Data/Hora"
@@ -1097,7 +1253,9 @@ with tabs[0]:
         st.markdown("---")
         st.markdown("<div class='secao-titulo'>📊 Variáveis Complementares</div>", unsafe_allow_html=True)
         for var in vars_selecionadas:
-            st.plotly_chart(grafico_variavel(df_main, var), use_container_width=True)
+            # CORREÇÃO: key= único por variável
+            st.plotly_chart(grafico_variavel(df_main, var),
+                            use_container_width=True, key=f"extra_{var}_sintese")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1115,14 +1273,18 @@ with tabs[1]:
         c3.metric("Total 7 dias", f"{precip_s.sum():.1f} mm")
         c4.metric("Máx horário",  f"{precip_s.max():.1f} mm/h")
 
-    st.plotly_chart(grafico_variavel(df_main, "precipitation",
-                    df_ic_precip if mostrar_spread else None),
-                    use_container_width=True)
+    # CORREÇÃO: key= "precip_main"
+    st.plotly_chart(
+        grafico_variavel(df_main, "precipitation",
+                         df_ic_precip if mostrar_spread else None),
+        use_container_width=True, key="precip_main"
+    )
 
     if mostrar_spread and ensemble_data:
         fig_sp = grafico_spread(ensemble_data, "precipitation")
         if fig_sp:
-            st.plotly_chart(fig_sp, use_container_width=True)
+            # CORREÇÃO: key= "precip_spread"
+            st.plotly_chart(fig_sp, use_container_width=True, key="precip_spread")
 
     if "precipitation" in df_main.columns:
         st.markdown("<div class='secao-titulo'>📅 Acumulado Diário</div>", unsafe_allow_html=True)
@@ -1139,9 +1301,10 @@ with tabs[1]:
           <h4>Referência: CAPE como proxy de tempestades</h4>
           <p>CAPE &lt; 500 J/kg: baixo risco · 500–1500: moderado · 1500–2500: alto · &gt;2500: extremo</p>
         </div>""", unsafe_allow_html=True)
-        st.plotly_chart(grafico_variavel(df_main, "cape"), use_container_width=True)
+        # CORREÇÃO: key= "cape_precip"
+        st.plotly_chart(grafico_variavel(df_main, "cape"),
+                        use_container_width=True, key="cape_precip")
 
-    # ── CSV da aba ──
     st.markdown("---")
     cols_precip = [c for c in ["precipitation", "cape", "weathercode"] if c in df_main.columns]
     if cols_precip:
@@ -1167,24 +1330,31 @@ with tabs[2]:
         c3.metric("Mínima 7d",  f"{ts.min():.1f} °C")
         c4.metric("Média 7d",   f"{ts.mean():.1f} °C")
 
-    st.plotly_chart(grafico_variavel(df_main, "temperature_2m",
-                    df_ic_temp if mostrar_spread else None),
-                    use_container_width=True)
+    # CORREÇÃO: key= "temp_main"
+    st.plotly_chart(
+        grafico_variavel(df_main, "temperature_2m",
+                         df_ic_temp if mostrar_spread else None),
+        use_container_width=True, key="temp_main"
+    )
 
     if mostrar_spread and ensemble_data:
         fig_st = grafico_spread(ensemble_data, "temperature_2m")
         if fig_st:
-            st.plotly_chart(fig_st, use_container_width=True)
+            # CORREÇÃO: key= "temp_spread"
+            st.plotly_chart(fig_st, use_container_width=True, key="temp_spread")
 
     if "dewpoint_2m" in df_main.columns:
         st.markdown("<div class='secao-titulo'>🌫️ Ponto de Orvalho</div>", unsafe_allow_html=True)
-        st.plotly_chart(grafico_variavel(df_main, "dewpoint_2m"), use_container_width=True)
+        # CORREÇÃO: key= "dewpoint_temp"
+        st.plotly_chart(grafico_variavel(df_main, "dewpoint_2m"),
+                        use_container_width=True, key="dewpoint_temp")
 
     if "shortwave_radiation" in df_main.columns:
         st.markdown("<div class='secao-titulo'>☀️ Radiação Solar de Onda Curta</div>", unsafe_allow_html=True)
-        st.plotly_chart(grafico_variavel(df_main, "shortwave_radiation"), use_container_width=True)
+        # CORREÇÃO: key= "radiation_temp"
+        st.plotly_chart(grafico_variavel(df_main, "shortwave_radiation"),
+                        use_container_width=True, key="radiation_temp")
 
-    # ── CSV da aba ──
     st.markdown("---")
     cols_temp = [c for c in ["temperature_2m", "dewpoint_2m", "shortwave_radiation"] if c in df_main.columns]
     if cols_temp:
@@ -1210,14 +1380,18 @@ with tabs[3]:
         c3.metric("Máxima 7d",  f"{ur_s.max():.0f} %")
         c4.metric(f"Horas < {IRR_UR_BAIXA:.0f}%", f"{int((ur_s < IRR_UR_BAIXA).sum())}h")
 
-    st.plotly_chart(grafico_variavel(df_main, "relativehumidity_2m",
-                    df_ic_ur if mostrar_spread else None),
-                    use_container_width=True)
+    # CORREÇÃO: key= "ur_main"
+    st.plotly_chart(
+        grafico_variavel(df_main, "relativehumidity_2m",
+                         df_ic_ur if mostrar_spread else None),
+        use_container_width=True, key="ur_main"
+    )
 
     if mostrar_spread and ensemble_data:
         fig_sur = grafico_spread(ensemble_data, "relativehumidity_2m")
         if fig_sur:
-            st.plotly_chart(fig_sur, use_container_width=True)
+            # CORREÇÃO: key= "ur_spread"
+            st.plotly_chart(fig_sur, use_container_width=True, key="ur_spread")
 
     if "et0_fao_evapotranspiration" in df_main.columns:
         st.markdown("<div class='secao-titulo'>🌿 Evapotranspiração de Referência (ETo)</div>", unsafe_allow_html=True)
@@ -1226,13 +1400,16 @@ with tabs[3]:
           <h4>ETo Penman-Monteith — FAO-56</h4>
           <p>Demanda evapotranspirativa horária. ETo &gt; 0.25 mm/h: atenção à irrigação. ETo &gt; 0.40 mm/h: elevada — irrigar.</p>
         </div>""", unsafe_allow_html=True)
-        st.plotly_chart(grafico_variavel(df_main, "et0_fao_evapotranspiration"), use_container_width=True)
+        # CORREÇÃO: key= "eto_ur"
+        st.plotly_chart(grafico_variavel(df_main, "et0_fao_evapotranspiration"),
+                        use_container_width=True, key="eto_ur")
 
     if "soil_moisture_0_to_1cm" in df_main.columns:
         st.markdown("<div class='secao-titulo'>🌱 Umidade do Solo (0–1 cm)</div>", unsafe_allow_html=True)
-        st.plotly_chart(grafico_variavel(df_main, "soil_moisture_0_to_1cm"), use_container_width=True)
+        # CORREÇÃO: key= "soilmoist_ur"
+        st.plotly_chart(grafico_variavel(df_main, "soil_moisture_0_to_1cm"),
+                        use_container_width=True, key="soilmoist_ur")
 
-    # ── CSV da aba ──
     st.markdown("---")
     cols_ur = [c for c in ["relativehumidity_2m", "et0_fao_evapotranspiration", "soil_moisture_0_to_1cm"] if c in df_main.columns]
     if cols_ur:
@@ -1258,30 +1435,39 @@ with tabs[4]:
         c3.metric("Média 7d",   f"{ws.mean():.1f} km/h")
         c4.metric(f"Horas < {DEF_VENTO_MAX:.0f} km/h", f"{int((ws < DEF_VENTO_MAX).sum())}h")
 
-    st.plotly_chart(grafico_variavel(df_main, "windspeed_10m",
-                    df_ic_vento if mostrar_spread else None),
-                    use_container_width=True)
+    # CORREÇÃO: key= "wind_main"
+    st.plotly_chart(
+        grafico_variavel(df_main, "windspeed_10m",
+                         df_ic_vento if mostrar_spread else None),
+        use_container_width=True, key="wind_main"
+    )
 
     if mostrar_spread and ensemble_data:
         fig_sw = grafico_spread(ensemble_data, "windspeed_10m")
         if fig_sw:
-            st.plotly_chart(fig_sw, use_container_width=True)
+            # CORREÇÃO: key= "wind_spread"
+            st.plotly_chart(fig_sw, use_container_width=True, key="wind_spread")
 
     if "windgusts_10m" in df_main.columns:
         st.markdown("<div class='secao-titulo'>💨 Rajadas de Vento</div>", unsafe_allow_html=True)
-        st.plotly_chart(grafico_variavel(df_main, "windgusts_10m"), use_container_width=True)
+        # CORREÇÃO: key= "gusts_wind"
+        st.plotly_chart(grafico_variavel(df_main, "windgusts_10m"),
+                        use_container_width=True, key="gusts_wind")
 
     col_p, col_c = st.columns(2)
     with col_p:
         if "surface_pressure" in df_main.columns:
             st.markdown("<div class='secao-titulo'>🔵 Pressão Superficial</div>", unsafe_allow_html=True)
-            st.plotly_chart(grafico_variavel(df_main, "surface_pressure"), use_container_width=True)
+            # CORREÇÃO: key= "pressure_wind"
+            st.plotly_chart(grafico_variavel(df_main, "surface_pressure"),
+                            use_container_width=True, key="pressure_wind")
     with col_c:
         if "cloudcover" in df_main.columns:
             st.markdown("<div class='secao-titulo'>☁️ Cobertura de Nuvens</div>", unsafe_allow_html=True)
-            st.plotly_chart(grafico_variavel(df_main, "cloudcover"), use_container_width=True)
+            # CORREÇÃO: key= "cloud_wind"
+            st.plotly_chart(grafico_variavel(df_main, "cloudcover"),
+                            use_container_width=True, key="cloud_wind")
 
-    # ── CSV da aba ──
     st.markdown("---")
     cols_vento = [c for c in ["windspeed_10m", "windgusts_10m", "surface_pressure", "cloudcover"] if c in df_main.columns]
     if cols_vento:
@@ -1294,6 +1480,7 @@ with tabs[4]:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ABA 5 — RELATÓRIO & E-MAIL
+# CORREÇÃO: gerar_relatorio_html agora recebe df_def e df_irr
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tabs[5]:
@@ -1306,20 +1493,26 @@ with tabs[5]:
         <div class='info-card'>
           <h4>📋 Boletim Agrometeorólogico</h4>
           <p>Gere o boletim completo da fazenda com todas as análises EMBRAPA/MAPA
-             e envie por e-mail para a equipe de campo.</p>
+             e envie por e-mail para a equipe de campo.<br>
+             <b>Novidade v6.1:</b> O e-mail agora inclui as tabelas detalhadas de
+             Defensivos (24h) e Irrigação (48h).</p>
         </div>""", unsafe_allow_html=True)
-        html_report = gerar_relatorio_html(nome_fazenda, info_faz, df_main, res, agora_str)
+        # CORREÇÃO: passa df_def e df_irr para incluir tabelas no e-mail
+        html_report = gerar_relatorio_html(
+            nome_fazenda, info_faz, df_main, res, agora_str,
+            df_def=df_def, df_irr=df_irr
+        )
         st.markdown("#### Pré-visualização")
-        components.html(html_report, height=500, scrolling=True)
+        components.html(html_report, height=700, scrolling=True)
 
     with col_r2:
         st.markdown("#### 📧 Envio por E-mail")
         if not _EMAIL_OK:
             st.markdown("""
             <div class='alert-amarelo'>
-              <b>⚠️ E-mail não configurado</b><br>
-              Adicione as credenciais Gmail em <code>.streamlit/secrets.toml</code>:<br><br>
-              <code>[email]<br>
+              <b style="color:#1a1a1a;">⚠️ E-mail não configurado</b><br>
+              <span style="color:#333;">Adicione as credenciais Gmail em <code>.streamlit/secrets.toml</code>:</span><br><br>
+              <code style="color:#333;">[email]<br>
               remetente = "seu@gmail.com"<br>
               senha_app = "xxxx xxxx xxxx xxxx"<br>
               destinatario = "dest1@ex.com"</code>
